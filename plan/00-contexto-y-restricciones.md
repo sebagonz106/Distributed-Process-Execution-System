@@ -52,6 +52,7 @@ No son decisiones del diseño: vienen dadas por el encargo y acotan todo lo dem�
 | Restricción | Consecuencia |
 |-------------|--------------|
 | Lenguaje Python, framework Ray | El plano de ejecución distribuida se apoya en Ray; hay que decidir qué se delega en Ray y qué se implementa (ver §5, A1). |
+| Ray es la única librería externa permitida por defecto; cualquier otra requiere aprobación previa | Se trabaja con la biblioteca estándar de Python; cada dependencia añadida se aprueba antes y se justifica en el documento del paso. |
 | Uso de Docker | El sistema debe poder levantarse y probarse en contenedores. |
 | Pruebas unitarias y CI/CD integrado | Ningún paso se da por cerrado sin pruebas y sin pasar el pipeline. |
 | Código limpio y revisado | Cada cambio pasa revisión antes de integrarse; se prefiere la solución mínima que cumple el requisito. |

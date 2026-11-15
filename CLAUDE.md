@@ -44,13 +44,18 @@ No se añade alcance fuera de R1–R9 sin que el usuario lo pida.
    ninguna atribución a IA en commits o PRs. El único autor es la identidad de
    git local. Solo se hace commit o push cuando el usuario lo pide.
 2. **Stack:** Python + Ray. Docker para ejecutar y desplegar.
-3. **`plan/` es parte del entregable.** Cada paso documenta cada decisión
+3. **Librerías externas: preguntar siempre antes de usarlas.** Por defecto la
+   única dependencia externa permitida es Ray; lo demás se resuelve con la
+   biblioteca estándar de Python. Antes de añadir cualquier otra librería
+   (también las de pruebas, desarrollo o CI) hay que pedir autorización al
+   usuario, indicando para qué se necesita y qué costaría hacerlo sin ella.
+4. **`plan/` es parte del entregable.** Cada paso documenta cada decisión
    estructural y su porqué *antes* de escribir el código (ver abajo).
-4. **Código limpio y revisado.** Usar el skill `ponytail` (mínimo código que
+5. **Código limpio y revisado.** Usar el skill `ponytail` (mínimo código que
    resuelve el requisito completo) y revisar cada cambio antes de darlo por hecho.
-5. **Pruebas unitarias y CI/CD.** Ningún paso se cierra sin pruebas que lo
+6. **Pruebas unitarias y CI/CD.** Ningún paso se cierra sin pruebas que lo
    evidencien y sin el pipeline en verde.
-6. **Sin suposiciones silenciosas.** Si hay varias lecturas de la orientación, se
+7. **Sin suposiciones silenciosas.** Si hay varias lecturas de la orientación, se
    presentan al usuario; no se elige por omisión.
 
 ## Documentación de decisiones (`plan/`)
