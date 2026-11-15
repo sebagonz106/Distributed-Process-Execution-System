@@ -163,6 +163,25 @@ class ResourcesTest(SpecTestCase):
                 self.assertRejected(document, f"tasks.hello.resources.{name}")
 
 
+class RetriesTest(SpecTestCase):
+    def test_the_default_budgets_apply_when_none_is_declared(self):
+        retries = parse_job(job()).tasks["hello"].retries
+
+        self.assertEqual({"task": 0, "worker": 3, "network": 4}, retries)
+
+    def test_a_declared_budget_replaces_only_its_own_class(self):
+        retries = parse_job(job(retries={"task": 2})).tasks["hello"].retries
+
+        self.assertEqual({"task": 2, "worker": 3, "network": 4}, retries)
+
+    def test_a_budget_is_a_whole_number_from_zero_to_ten(self):
+        for retries in ({"task": -1}, {"worker": 11}, {"network": 1.5},
+                        {"task": True}, {"other": 1}, [3]):
+            with self.subTest(retries=retries):
+                document = job(retries=retries)
+                self.assertRejected(document, "tasks.hello.retries")
+
+
 WORKER_1 = {"CPU": 2.0, "memory": 4 * 2**30, "worker-1": 1.0}
 WORKER_2 = {"CPU": 2.0, "memory": 4 * 2**30, "worker-2": 1.0}
 CONTROL_NODE = {"memory": 4 * 2**30}

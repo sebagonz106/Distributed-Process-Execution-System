@@ -58,5 +58,55 @@ class ExecuteTest(unittest.TestCase):
         self.assertEqual(Evidence.WORKSPACE_FAILED, outcome.evidence)
 
 
+class Stopped(Exception):
+    """Stands in for exiting or hanging, which would stop the test run."""
+
+
+@mock.patch.dict(os.environ, {"DPES_FAULT_INJECTION": "1"})
+class InjectedFaultTest(unittest.TestCase):
+    def numbered(self, number, fault):
+        return attempt("echo ran", env={"DPES_FAULT": fault},
+                       execution_id=f"job-1/t/0/{number}")
+
+    def test_network_fails_the_first_attempts_then_lets_them_run(self):
+        outcomes = [execute(self.numbered(n, "network:2")) for n in (1, 2, 3)]
+
+        self.assertEqual(
+            [Evidence.INPUT_UNAVAILABLE, Evidence.INPUT_UNAVAILABLE],
+            [outcome.evidence for outcome in outcomes[:2]],
+        )
+        self.assertEqual("ran\n", outcomes[2].output_tail)
+
+    def test_crash_ends_the_executor_process(self):
+        with mock.patch("os._exit", side_effect=Stopped) as exit_:
+            with self.assertRaises(Stopped):
+                execute(self.numbered(1, "crash:1"))
+        exit_.assert_called_once()
+
+    def test_hang_blocks_before_running_the_command(self):
+        # Only the executor's own wait: subprocess also sleeps internally.
+        with mock.patch("dpes.executor._hang", side_effect=Stopped) as hang:
+            with mock.patch("dpes.sandbox.run") as run:
+                with self.assertRaises(Stopped):
+                    execute(self.numbered(1, "hang:1"))
+        hang.assert_called_once()
+        run.assert_not_called()
+
+    def test_a_malformed_fault_is_ignored(self):
+        for fault in ("crash", "crash:x", "explode:1", ""):
+            with self.subTest(fault=fault):
+                outcome = execute(self.numbered(1, fault))
+                self.assertEqual("ran\n", outcome.output_tail)
+
+
+class FaultsDisabledTest(unittest.TestCase):
+    def test_without_the_cluster_switch_a_fault_is_ignored(self):
+        with mock.patch.dict(os.environ, {"DPES_FAULT_INJECTION": "0"}):
+            outcome = execute(attempt("echo ran",
+                                      env={"DPES_FAULT": "network:9"}))
+
+        self.assertEqual("ran\n", outcome.output_tail)
+
+
 if __name__ == "__main__":
     unittest.main()

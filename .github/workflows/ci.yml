@@ -34,6 +34,8 @@ jobs:
         run: >
           docker compose -f docker/compose.yaml exec -T head
           python -m unittest discover -s tests/e2e
+      - name: A worker container dies mid-task (from the host, D09.7)
+        run: python3 -m unittest discover -s tests/chaos
       - name: Cluster logs
         if: failure()
         run: docker compose -f docker/compose.yaml logs

@@ -10,6 +10,10 @@ x-worker: &worker
   init: true  # reaps the orphans of killed task process groups (D07.19)
   shm_size: 1gb
   networks: [cluster]
+  # This is the test and demonstration cluster: tasks may ask for injected
+  # faults (plan/09, D09.7). A production deployment would leave it unset.
+  environment:
+    DPES_FAULT_INJECTION: "1"
   depends_on:
     head:
       condition: service_healthy

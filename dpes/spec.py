@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Mapping
 
 from dpes.dag import find_cycle
+from dpes.failures import DEFAULT_RETRIES
 
 DEFAULT_TIMEOUT_S = 600.0
 MAX_TIMEOUT_S = 86_400.0
@@ -19,7 +20,8 @@ _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _CAPABILITY = re.compile(r"[a-z][a-z0-9_-]{0,63}")
 _RAY_OWNED = {"memory", "object_store_memory"}  # Ray's own lower-case names
 _JOB_FIELDS = {"tasks"}
-_TASK_FIELDS = {"command", "env", "timeout_s", "needs", "resources"}
+_TASK_FIELDS = {"command", "env", "timeout_s", "needs", "resources", "retries"}
+MAX_RETRIES = 10
 
 
 class SpecError(ValueError):
@@ -38,6 +40,9 @@ class TaskSpec:
     needs: tuple[str, ...] = ()
     resources: Mapping[str, float] = field(
         default_factory=lambda: {"cpu": 1.0}
+    )
+    retries: Mapping[str, int] = field(
+        default_factory=lambda: dict(DEFAULT_RETRIES)
     )
 
 
@@ -152,10 +157,26 @@ def _parse_task(path, raw, errors):
         f"{path}.resources", raw.get("resources", {}), errors
     )
 
+    retries = raw.get("retries", {})
+    if not (
+        isinstance(retries, dict)
+        and retries.keys() <= DEFAULT_RETRIES.keys()
+        and all(
+            isinstance(n, int) and not isinstance(n, bool)
+            and 0 <= n <= MAX_RETRIES
+            for n in retries.values()
+        )
+    ):
+        errors.append(
+            f"{path}.retries: whole numbers from 0 to {MAX_RETRIES} for "
+            "task, worker and network"
+        )
+
     if len(errors) > found:
         return None
     return TaskSpec(
-        tuple(command), dict(env), float(timeout), tuple(needs), resources
+        tuple(command), dict(env), float(timeout), tuple(needs), resources,
+        {**DEFAULT_RETRIES, **retries},
     )
 
 
