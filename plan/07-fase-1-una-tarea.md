@@ -214,6 +214,9 @@ propia, como en la Fase 0.
 
 ### D07.13 — Límite conocido hasta la Fase 5: sin plazo por intento
 
+> **Resuelto por D09.4 y D09.8** (Fase 5, 2026-11-15): cada intento tiene un
+> plazo de cola y otro de ejecución.
+
 - **Hecho:** el coordinador todavía no pone plazo a un intento. Con un
   trabajador pausado o incomunicado, Ray no avisa (D06.14), así que en esta fase
   el trabajo se queda en `RUNNING` hasta que el trabajador vuelve.

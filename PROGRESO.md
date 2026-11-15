@@ -18,7 +18,7 @@
 | ✅ | 2 · DAG y recursos | Rombo en paralelo, ciclo rechazado, dependientes omitidos | R1 R2 | A | 15 nov |
 | ⬜ | 3 · Artefactos | Compila en un nodo, enlaza en otro, se descarga el binario | R3 R4 | B | 22 nov |
 | ⬜ | 4 · Logs | `logs -f` en vivo; el log sobrevive al trabajador muerto | R5 | B | 24 nov |
-| ⬜ | 5 · Fallos | Un guion por clase de fallo, con su reintento | R6 R8 | A | 25 nov |
+| 🟡 | 5 · Fallos | Un guion por clase de fallo, con su reintento | R6 R8 | A | 25 nov |
 | ⬜ | 6 · Confirmación | El trabajador muere tras guardar: una sola ejecución | R7 | A | 27 nov |
 | ⬜ | 7 · Caché | Reenviar no ejecuta nada; cambiar un fichero recompila solo ese | R9 | B | 28 nov |
 | ⬜ | 8 · Entrega | Demo desde un clon limpio, imagen publicada | — | A y B | 30 nov |
@@ -30,10 +30,22 @@
 | Estado | ✅ | ✅ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
 | Se cumple al cerrar la fase | 2 | 2 | 3 | 3 | 4 | 5 | 6 | 5 | 7 |
 
-## Siguiente: 3 · Artefactos (B), después 4 · Logs (B) y 5 · Fallos (A)
+## Fase en curso: 5 · Fallos (adelantada a la 3 y la 4)
 
-La Fase 5 (tuya) necesita la 2, ya cerrada, y se apoya en el historial de la 4.
-Pruebas hoy: 99 unitarias, 9 de integración y 11 de extremo a extremo en verde.
+| | Parte | Quién |
+|:-:|-------|:-----:|
+| ✅ | Clasificador `TASK` / `WORKER` / `NETWORK` y política de reintentos | A |
+| ✅ | Presupuestos por tarea (`retries`) y esperas crecientes | A |
+| ✅ | Plazo por intento (de cola y de ejecución) | A |
+| ✅ | Fallos inyectables y prueba de caída real de un trabajador | A |
+| ✅ | Corte C5 en local | A |
+| ⬜ | CI en verde en GitHub (falta el push) | — |
+
+Pruebas: 125 unitarias, 12 de integración, 16 de extremo a extremo y 1 de
+caída real en verde. Decisiones:
+[plan/09-fase-5-fallos-y-reintentos.md](plan/09-fase-5-fallos-y-reintentos.md).
+
+Después: Fase 3 (artefactos, B). La Fase 6 (tuya) necesita la 3.
 
 Los contratos de `dpes/messages.py` quedaron congelados al cerrar la Fase 1
 sin que B los revisara; cambiarlos ahora requiere una decisión escrita

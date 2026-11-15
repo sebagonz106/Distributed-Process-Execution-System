@@ -143,6 +143,8 @@ decisión aprobada requiere una decisión nueva que la sustituya.
 - [plan/07-fase-1-una-tarea.md](plan/07-fase-1-una-tarea.md) y
   [plan/08-fase-2-dag-y-recursos.md](plan/08-fase-2-dag-y-recursos.md):
   Fases 1 y 2.
+- [plan/09-fase-5-fallos-y-reintentos.md](plan/09-fase-5-fallos-y-reintentos.md):
+  Fase 5.
 
 Al empezar una fase se crea su documento con el siguiente número libre (D04.5).
 
@@ -159,6 +161,8 @@ tiene que estar en marcha:
   `docker compose -f docker/compose.yaml exec -T head python -m unittest discover -s tests/integration`
   (y lo mismo con `tests/e2e`). Tras cambiar código hay que volver a construir
   la imagen (`up -d --build`): el código va copiado dentro, no montado.
+- Caída real de un trabajador, desde el anfitrión (necesita Docker):
+  `py -m unittest discover -s tests/chaos`
 - Apagar: `docker compose -f docker/compose.yaml down`
 
 La CI (`.github/workflows/ci.yml`) corre en cada push las unitarias fuera del
@@ -184,8 +188,15 @@ plazo por intento (D07.13).
 Fase 2 cerrada el 2026-11-15, con el corte C2 en verde en la CI
 ([plan/08](plan/08-fase-2-dag-y-recursos.md)): `needs`, `resources`,
 `dag.py`, despacho por tareas listas, omisión de dependientes y rechazo de lo
-que ningún nodo puede ejecutar. R1 y R2 cumplidos. Siguiente: Fase 3
-(artefactos, pista B); la Fase 5 (pista A) ya puede empezar.
+que ningún nodo puede ejecutar. R1 y R2 cumplidos.
+
+Fase 5 hecha en local, adelantada a la 3 y la 4
+([plan/09](plan/09-fase-5-fallos-y-reintentos.md)): `failures.py`
+(clasificador y esperas), `retries` por tarea, `RETRY_WAIT`, historial de
+intentos en la vista, plazo de cola y de ejecución por intento, y fallos
+inyectables (`DPES_FAULT`, solo con `DPES_FAULT_INJECTION=1` en el
+trabajador). Se cierra cuando la CI pase en GitHub. Siguiente: Fase 3
+(artefactos, pista B); la Fase 6 la necesita.
 
 Uso desde Windows con el clúster levantado:
 `py -m dpes.cli submit job.json`, `py -m dpes.cli wait <id>`.
