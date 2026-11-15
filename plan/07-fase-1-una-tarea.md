@@ -1,7 +1,10 @@
 # 07 — Fase 1: una tarea de extremo a extremo
 
 - **Fecha:** 2026-11-15
-- **Estado:** en curso
+- **Estado:** cerrada el 2026-11-15. El corte C1 pasó en la CI de GitHub
+  (ejecución 43732301774, commit `5f75c79`). Con el cierre quedan congelados
+  los contratos de `dpes/messages.py` (D03.3), con el campo `output_tail` de
+  D07.14; la persona B no llegó a revisarlos.
 - **Paso:** Fase 1 de [03-fases-y-dependencias.md](03-fases-y-dependencias.md)
 - **Corte:** C1 — se envía un trabajo de una tarea y `status` muestra
   `SUCCEEDED` con su salida; con un comando que falla muestra `FAILED` y el
@@ -19,7 +22,7 @@
 | Coordinador como actor de Ray | — | A | Hecho, probado en el clúster con un ejecutor de prueba |
 | Espacio aislado: directorio, entorno, grupo de procesos, tiempo límite | F3.1, F3.3, F3.4 | B, hecho por A | Hecho |
 | Ejecutor como tarea de Ray y captura de la salida | F3.5, F5.1 | B, hecho por A | Hecho |
-| Pasarela en el clúster y prueba C1 | — | A | Hecho en local; falta la CI en GitHub |
+| Pasarela en el clúster y prueba C1 | — | A | Hecho; C1 en verde en la CI |
 
 La parte de la persona B la hizo la persona A el 2026-11-15, a petición
 propia, como en la Fase 0.

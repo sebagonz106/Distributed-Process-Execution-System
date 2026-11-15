@@ -169,12 +169,13 @@ Fase 0 cerrada el 2026-11-15, con la CI en verde en GitHub (ver
 nodos, CI y experimento de fallos de Ray. La persona A hizo también la parte de
 B en esta fase.
 
-Fase 1 hecha en local ([plan/07](plan/07-fase-1-una-tarea.md)): `spec.py`,
-`scheduler.py`, `gateway.py`, `cli.py`, `coordinator.py`, `sandbox.py` y
-`executor.py`; la pasarela arranca con el nodo de control en
-`127.0.0.1:8000`. La persona A hizo también la parte de B. Se cierra cuando la
-CI pase en GitHub. Límite conocido hasta la Fase 5: sin plazo por intento
-(D07.13).
+Fase 1 cerrada el 2026-11-15, con el corte C1 en verde en la CI
+([plan/07](plan/07-fase-1-una-tarea.md)): `spec.py`, `scheduler.py`,
+`gateway.py`, `cli.py`, `coordinator.py`, `sandbox.py` y `executor.py`; la
+pasarela arranca con el nodo de control en `127.0.0.1:8000`. La persona A hizo
+también la parte de B. Los contratos de `dpes/messages.py` están congelados:
+cambiarlos requiere una decisión escrita. Límite conocido hasta la Fase 5: sin
+plazo por intento (D07.13). Siguiente: Fase 2 (A) y Fase 3 (B), en paralelo.
 
 Uso desde Windows con el clúster levantado:
 `py -m dpes.cli submit job.json`, `py -m dpes.cli wait <id>`.
