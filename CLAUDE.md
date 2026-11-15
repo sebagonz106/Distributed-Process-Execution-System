@@ -1,0 +1,108 @@
+# CLAUDE.md
+
+Proyecto final de **Sistemas Distribuidos** (Ciencia de la Computación, MATCOM,
+4.º año): **P17 — Ejecutor distribuido de compilación y pruebas**.
+Todo lo que se entregue debe estar a nivel universitario de CS: cada decisión se
+justifica con el modelo de fallos y las garantías que se defienden.
+
+Repo: <https://github.com/sebagonz106/Distributed-Process-Execution-System>
+(rama por defecto `main`; se trabaja con permiso de escritura como colaborador).
+
+## Orientación — se cumple al pie de la letra
+
+**Descripción.** Los sistemas de integración continua convierten una revisión de
+código y un flujo de trabajo en numerosas tareas ejecutables. El sistema debe
+modelar dependencias, aislamiento, registros, artefactos, caché y diferencias
+entre fallo de la tarea y fallo de infraestructura.
+
+**Objetivo general.** Construir un servicio donde los clientes envíen trabajos de
+compilación o pruebas con comandos, dependencias, entradas y requisitos de
+recursos; los trabajadores ejecutan las tareas en entornos aislados y devuelven
+estado, registros y artefactos.
+
+**Funcionalidades y alcance** (IDs usados en `plan/` y en las pruebas):
+
+- **R1** Recepción de trabajos con dependencias.
+- **R2** Planificación de un grafo acíclico dirigido (DAG) de tareas.
+- **R3** Ejecución aislada en trabajadores.
+- **R4** Transferencia de entradas y artefactos.
+- **R5** Registro y transmisión de logs.
+- **R6** Clasificación de fallos de tarea, trabajador y red.
+- **R7** Tratamiento del caso «la tarea terminó, pero se perdió la confirmación».
+- **R8** Políticas de reintento según el tipo de fallo.
+- **R9** Caché basada en contenido para evitar trabajo idéntico cuando las entradas no cambian.
+
+**Referencias para comparación arquitectónica:** GitHub Actions (flujos, trabajos,
+ejecutores), Buildkite (agentes que obtienen trabajo, transmiten logs y publican
+artefactos), HTCondor (ejecución distribuida por lotes).
+
+No se añade alcance fuera de R1–R9 sin que el usuario lo pida.
+
+## Reglas obligatorias
+
+1. **Commits sin coautor.** Nunca añadir `Co-Authored-By`, «Generated with» ni
+   ninguna atribución a IA en commits o PRs. El único autor es la identidad de
+   git local. Solo se hace commit o push cuando el usuario lo pide.
+2. **Stack:** Python + Ray. Docker para ejecutar y desplegar.
+3. **`plan/` es parte del entregable.** Cada paso documenta cada decisión
+   estructural y su porqué *antes* de escribir el código (ver abajo).
+4. **Código limpio y revisado.** Usar el skill `ponytail` (mínimo código que
+   resuelve el requisito completo) y revisar cada cambio antes de darlo por hecho.
+5. **Pruebas unitarias y CI/CD.** Ningún paso se cierra sin pruebas que lo
+   evidencien y sin el pipeline en verde.
+6. **Sin suposiciones silenciosas.** Si hay varias lecturas de la orientación, se
+   presentan al usuario; no se elige por omisión.
+
+## Documentación de decisiones (`plan/`)
+
+- Un archivo por paso: `plan/NN-titulo.md`, en español.
+- Decisiones numeradas `DNN.k` con: contexto → opciones consideradas → decisión →
+  porqué → consecuencias. Las alternativas descartadas se dejan escritas.
+- Una decisión que cambia no se borra: se marca «sustituida por …».
+- Al cerrar un paso se actualiza la tabla de trazabilidad R1–R9 en
+  [plan/00-contexto-y-restricciones.md](plan/00-contexto-y-restricciones.md),
+  que también lista las decisiones abiertas (A1–A10) y los riesgos.
+
+## Flujo de trabajo por paso
+
+1. Acordar el alcance del paso con el usuario.
+2. Escribir `plan/NN-*.md` con las decisiones.
+3. Pruebas primero, luego la implementación mínima.
+4. Revisión del diff y verificación (pruebas + CI) antes de afirmar que está hecho.
+5. Actualizar trazabilidad.
+
+## Convenciones
+
+- Documentación en español; identificadores, comentarios y mensajes de commit en
+  inglés (supuesto D0.2, pendiente de confirmar).
+- Comentarios solo para el porqué que el código no puede mostrar.
+
+## Recursos de la asignatura
+
+Carpeta (solo lectura, **no** copiar al repo):
+`C:\Users\Juank\Carrera\4to Año\Primer Semestre\Distribuidos`
+
+- Sitio del curso: <https://matcom.github.io/distributed-systems-2026> (12 capítulos).
+- `Conferencias/Conf 1..4/*.zip`: PDF + audios. Conf 3 «El nodo y sus fronteras»,
+  Conf 4 «Comunicación». `Conf 5` solo tiene audios `.ogg`.
+- `Labs/Lab1..4/*.zip`: notas del profesor (`.md`/`.pdf`) + scripts.
+  - **Lab1** — timeout ambiguo, visión parcial, punto de confirmación → base de R6/R7.
+  - **Lab2** — estilos de arquitectura y middleware → comparación arquitectónica.
+  - **Lab3** — concurrencia, aislamiento, colas acotadas, apagado → R3 y el worker.
+  - **Lab4** — RPC, reintentos con ID, deduplicación, respuesta tardía, reinicio → R7/R8.
+
+Para consultarlos, extraer el zip al directorio temporal de la sesión, nunca
+dentro del repo. Citar el material del curso en `plan/` cuando respalde una decisión.
+
+## Entorno
+
+- Windows 11; shell PowerShell, Git Bash disponible.
+- Python 3.13 mediante el lanzador `py` (`python` no está en el PATH).
+- Docker 29 instalado. Ray tiene soporte limitado en Windows: el clúster y las
+  pruebas de integración corren en contenedores Linux.
+- `gh` autenticado con la cuenta del autor de los commits.
+
+## Estado
+
+Paso 00 hecho: contexto y restricciones. No hay código todavía; la arquitectura
+(decisiones A1–A10) está sin decidir y se acuerda con el usuario antes de implementar.
