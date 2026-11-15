@@ -64,7 +64,7 @@ continua (D03.4).
 ### D04.5 — Un documento de `plan/` por fase
 
 - **Decisión:** al empezar cada fase se crea su documento con el siguiente
-  número libre (`05-fase-0-…`, `06-fase-1-…`). Recoge las decisiones de
+  número libre (`06-fase-0-…`, `07-fase-1-…`; el 05 lo ocupan los diagramas). Recoge las decisiones de
   implementación que este plan deja abiertas a propósito: nombres de tablas,
   formato exacto de los mensajes, valores de plazos y tamaños.
 - **Porqué:** esas decisiones dependen de lo que se aprende al construir;

@@ -1,0 +1,43 @@
+sequenceDiagram
+  autonumber
+  actor U as Cliente
+  participant P as Pasarela
+  participant C as Coordinador
+  participant A as Almacén
+  participant E as Ejecutor
+  participant L as Registro de logs
+
+  U->>P: sube las entradas (un blob por digest)
+  P->>A: guardar blobs
+  U->>P: envía el trabajo (JSON)
+  P->>P: valida estructura, ciclos, rutas y recursos
+  P->>C: aceptar trabajo
+  C->>C: guarda el trabajo en disco
+  C-->>P: identificador
+  P-->>U: identificador del trabajo
+
+  loop por cada tarea cuyas dependencias terminaron con éxito
+    C->>A: ¿hay resultado en caché para la clave de acción?
+    alt acierto de caché
+      A-->>C: resultado guardado
+      Note over C: la tarea no se ejecuta
+    else sin acierto
+      A-->>C: no
+      C->>E: ejecutar intento (tarea de Ray sin reintentos)
+      E->>A: traer entradas y verificar cada digest
+      E->>E: ejecuta el comando en el espacio aislado
+      E-)L: fragmentos de log numerados
+      E->>A: subir salidas
+      E->>A: guardar resultado (el primero que escribe gana)
+      A-->>E: resultado ganador
+      E-->>C: confirmación
+    end
+    C->>C: marca la tarea y calcula las siguientes listas
+  end
+
+  Note over U,L: en cualquier momento el cliente consulta estado, eventos y logs desde un desplazamiento
+
+  U->>P: pide los artefactos
+  P->>A: leer blobs
+  A-->>P: contenido
+  P-->>U: artefactos

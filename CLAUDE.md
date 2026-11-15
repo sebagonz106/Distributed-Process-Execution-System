@@ -128,11 +128,19 @@ decisión aprobada requiere una decisión nueva que la sustituya.
   control el 22 y el 26 de noviembre, congelación el 29, entrega el 1 de
   diciembre de 2026.
 
-Al empezar una fase se crea su documento con el siguiente número libre (D04.5).
+- [plan/05-diagramas.md](plan/05-diagramas.md): siete diagramas (dependencias
+  entre fases y entre módulos, flujo de un trabajo, decisión del coordinador,
+  ejecutor, estados de una tarea, confirmación perdida). Cada uno es un par
+  `plan/diagramas/<nombre>.mmd` + `.svg`; al cambiar la fuente hay que volver a
+  generar la imagen (D05.1).
+
+Al empezar una fase se crea su documento con el siguiente número libre (D04.5);
+el de la Fase 0 será el 06.
 
 ## Estado
 
-Pasos 00–04 hechos: contexto, análisis, arquitectura, fases y calendario. No hay
+Pasos 00–05 hechos: contexto, análisis, arquitectura, fases, calendario y
+diagramas. No hay
 código todavía. Siguiente: Fase 0.
 
 El usuario de estas sesiones (Juan Carlos) es la **persona A, pista de

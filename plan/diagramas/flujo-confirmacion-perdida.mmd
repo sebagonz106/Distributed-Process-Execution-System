@@ -1,0 +1,25 @@
+sequenceDiagram
+  autonumber
+  participant C as Coordinador
+  participant E as Ejecutor
+  participant A as Almacén
+
+  C->>C: guarda el intento con su identificador de ejecución
+  C->>E: ejecutar intento
+  E->>A: traer entradas
+  E->>E: ejecuta el comando en el espacio aislado
+  E->>A: subir salidas
+  E->>A: guardar resultado (clave, identificador, resultado)
+  Note over A: punto de confirmación<br/>el primero que escribe gana
+  A-->>E: resultado ganador
+  E--xC: confirmación (se pierde)
+  Note over C: excepción o plazo vencido<br/>clasifica como WORKER o NETWORK
+  C->>A: consultar la clave antes de relanzar
+  alt hay resultado guardado
+    A-->>C: resultado ganador
+    C->>C: lo adopta y no vuelve a ejecutar
+  else no hay resultado guardado
+    A-->>C: nada
+    C->>C: programa un intento nuevo según la clase
+  end
+  Note over C,A: si el intento antiguo guarda más tarde, el nuevo recibe ese mismo resultado al guardar

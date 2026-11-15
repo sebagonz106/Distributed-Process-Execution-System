@@ -1,0 +1,44 @@
+flowchart TD
+  lista(["Tarea con todas sus dependencias<br/>terminadas con éxito"])
+  cache{"¿Clave de acción<br/>en caché?"}
+  lanzar["Crear intento con identificador de ejecución<br/>y lanzarlo como tarea de Ray sin reintentos"]
+  recibe{"¿Qué recibe<br/>el coordinador?"}
+  claseTarea["Clase TASK"]
+  claseTrabajador["Clase WORKER"]
+  claseRed["Clase NETWORK"]
+  presupuestoTarea{"¿Queda presupuesto<br/>de reintento de tarea?"}
+  reconciliar{"Reconciliar:<br/>¿hay resultado guardado<br/>para la clave?"}
+  adoptar["Adoptar el resultado guardado<br/>sin volver a ejecutar"]
+  presupuestoInfra{"¿Queda presupuesto<br/>para esa clase?"}
+  esperar["Esperar: nada si WORKER,<br/>exponencial con aleatoriedad si NETWORK"]
+  exitoCache(["SUCCEEDED<br/>de caché"])
+  exito(["SUCCEEDED"])
+  fallo(["FAILED<br/>los dependientes pasan a SKIPPED"])
+  error(["ERROR<br/>fallo de infraestructura"])
+
+  lista --> cache
+  cache -- "sí" --> exitoCache
+  cache -- "no" --> lanzar
+  lanzar --> recibe
+  recibe -- "resultado con código 0" --> exito
+  recibe -- "resultado con error o tiempo límite" --> claseTarea
+  recibe -- "aviso de proceso o nodo muerto" --> claseTrabajador
+  recibe -- "error de transferencia o plazo vencido" --> claseRed
+  claseTarea --> presupuestoTarea
+  presupuestoTarea -- "no" --> fallo
+  presupuestoTarea -- "sí, ronda nueva" --> lanzar
+  claseTrabajador --> reconciliar
+  claseRed --> reconciliar
+  reconciliar -- "sí" --> adoptar
+  adoptar -. "se trata como recibido" .-> recibe
+  reconciliar -- "no" --> presupuestoInfra
+  presupuestoInfra -- "no" --> error
+  presupuestoInfra -- "sí" --> esperar
+  esperar --> lanzar
+
+  classDef ok fill:#dcfce7,stroke:#15803d,color:#111827
+  classDef mal fill:#fee2e2,stroke:#b91c1c,color:#111827
+  classDef infra fill:#ffedd5,stroke:#c2410c,color:#111827
+  class exito,exitoCache ok
+  class fallo,claseTarea mal
+  class error,claseTrabajador,claseRed infra

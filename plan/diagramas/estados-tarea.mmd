@@ -1,0 +1,32 @@
+flowchart LR
+  inicio(["trabajo aceptado"])
+  PENDING(["PENDING"])
+  READY(["READY"])
+  RUNNING(["RUNNING"])
+  RETRY_WAIT(["RETRY_WAIT"])
+  SUCCEEDED(["SUCCEEDED"])
+  FAILED(["FAILED"])
+  ERROR(["ERROR"])
+  SKIPPED(["SKIPPED"])
+
+  inicio --> PENDING
+  PENDING -- "dependencias con éxito" --> READY
+  PENDING -- "una dependencia sin éxito" --> SKIPPED
+  READY -- "acierto de caché" --> SUCCEEDED
+  READY -- "intento lanzado" --> RUNNING
+  RUNNING -- "código 0" --> SUCCEEDED
+  RUNNING -- "fallo reintentable" --> RETRY_WAIT
+  RETRY_WAIT -- "intento nuevo" --> RUNNING
+  RUNNING -- "fallo de tarea definitivo" --> FAILED
+  RUNNING -- "fallo de infraestructura definitivo" --> ERROR
+
+  classDef ok fill:#dcfce7,stroke:#15803d,color:#111827
+  classDef mal fill:#fee2e2,stroke:#b91c1c,color:#111827
+  classDef infra fill:#ffedd5,stroke:#c2410c,color:#111827
+  classDef omitida fill:#f3f4f6,stroke:#374151,color:#111827
+  classDef entrada fill:#ffffff,stroke:#9ca3af,color:#374151,stroke-dasharray:4 3
+  class SUCCEEDED ok
+  class FAILED mal
+  class ERROR infra
+  class SKIPPED omitida
+  class inicio entrada

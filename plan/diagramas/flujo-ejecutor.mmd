@@ -1,0 +1,42 @@
+flowchart TD
+  inicio(["Recibe un intento"])
+  espacio["Crear un espacio de trabajo nuevo<br/>con entorno limpio"]
+  entradas["Traer las entradas del almacén<br/>y verificar cada digest"]
+  ejecutar["Ejecutar el comando en su grupo de procesos<br/>enviando fragmentos de log numerados"]
+  limite{"¿Venció el<br/>tiempo límite?"}
+  matar["Matar el árbol de procesos"]
+  codigo{"¿Código de<br/>salida 0?"}
+  salidas["Recoger las salidas declaradas<br/>y subirlas al almacén"]
+  resultado["Construir el resultado:<br/>código, salidas, tiempo límite"]
+  guardar["Guardar el resultado en el almacén<br/>el primero que escribe gana"]
+  limpiar["Destruir el espacio de trabajo"]
+  devolver(["Devolver el resultado ganador<br/>es la confirmación al coordinador"])
+  falloTrabajador(["Informa evidencia<br/>de fallo de trabajador"])
+  falloRed(["Informa evidencia<br/>de fallo de red"])
+
+  inicio --> espacio
+  espacio -- "no se puede crear" --> falloTrabajador
+  espacio --> entradas
+  entradas -- "no llegan o un digest no coincide" --> falloRed
+  entradas --> ejecutar
+  ejecutar --> limite
+  limite -- "sí" --> matar
+  matar --> resultado
+  limite -- "no" --> codigo
+  codigo -- "no" --> resultado
+  codigo -- "sí" --> salidas
+  salidas -- "falta una salida declarada" --> resultado
+  salidas -- "no se pueden subir" --> falloRed
+  salidas --> resultado
+  resultado --> guardar
+  guardar -- "sin respuesta: reintenta con el mismo identificador" --> guardar
+  guardar -- "reintentos agotados" --> falloRed
+  guardar --> limpiar
+  limpiar --> devolver
+
+  classDef infra fill:#ffedd5,stroke:#c2410c,color:#111827
+  classDef ok fill:#dcfce7,stroke:#15803d,color:#111827
+  classDef clave fill:#dbeafe,stroke:#1d4ed8,color:#111827
+  class falloTrabajador,falloRed infra
+  class devolver ok
+  class guardar clave

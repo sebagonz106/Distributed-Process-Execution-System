@@ -191,7 +191,9 @@ las de [02-arquitectura.md](02-arquitectura.md). Las fechas y el reparto están 
 ## 3. Mapa de dependencias
 
 Flecha continua: no se puede empezar sin lo anterior. Flecha discontinua: se
-puede empezar, pero la integración final lo necesita.
+puede empezar, pero la integración final lo necesita. La misma información como
+imagen, con el reparto por persona y las fechas de cierre, está en
+[05-diagramas.md](05-diagramas.md).
 
 ```mermaid
 flowchart TD

@@ -1,0 +1,43 @@
+flowchart TD
+  cli["cli.py<br/>cliente de línea de comandos<br/>(cliente)"]
+  gateway["gateway.py<br/>API HTTP<br/>(nodo de control)"]
+  coordinator["coordinator.py<br/>actor de Ray<br/>(nodo de control)"]
+  executor["executor.py<br/>tarea de Ray<br/>(nodo trabajador)"]
+  store["store.py<br/>SQLite: estado, resultados,<br/>caché, eventos"]
+  cas["cas.py<br/>blobs en disco"]
+  sandbox["sandbox.py<br/>espacio aislado"]
+  scheduler["scheduler.py<br/>máquina de estados"]
+  dag["dag.py<br/>grafo y orden"]
+  spec["spec.py<br/>modelo y validación"]
+  failures["failures.py<br/>clasificador y política"]
+  hashing["hashing.py<br/>digests y clave de acción"]
+
+  cli -. "HTTP" .-> gateway
+  gateway -. "mensajes" .-> coordinator
+  coordinator -. "lanza intentos" .-> executor
+
+  gateway --> spec
+  coordinator --> scheduler
+  coordinator --> store
+  executor --> sandbox
+  executor --> hashing
+  cli --> hashing
+  cas --> hashing
+  scheduler --> dag
+  scheduler --> failures
+  scheduler --> hashing
+  dag --> spec
+
+  subgraph LEYENDA["Leyenda"]
+    direction LR
+    L1["Puro: sin Ray,<br/>sin disco, sin reloj"]
+    L2["Usa Ray"]
+    L3["Disco, red<br/>o procesos"]
+  end
+
+  classDef puro fill:#fef9c3,stroke:#a16207,color:#111827
+  classDef ray fill:#dbeafe,stroke:#1d4ed8,color:#111827
+  classDef io fill:#f3f4f6,stroke:#374151,color:#111827
+  class scheduler,dag,spec,failures,hashing,L1 puro
+  class coordinator,executor,L2 ray
+  class cli,gateway,store,cas,sandbox,L3 io
