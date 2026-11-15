@@ -1,0 +1,71 @@
+# One control node and two workers on their own network (plan/02, D02.15).
+#
+#   docker compose -f docker/compose.yaml up -d --build
+#   docker compose -f docker/compose.yaml down
+
+name: dpes
+
+x-worker: &worker
+  image: dpes:dev
+  shm_size: 1gb
+  networks: [cluster]
+  depends_on:
+    head:
+      condition: service_healthy
+
+services:
+  head:
+    image: dpes:dev
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: dpes-head
+    hostname: head
+    shm_size: 1gb
+    networks: [cluster]
+    # No CPUs: the control node coordinates, it never runs tasks.
+    command:
+      - ray
+      - start
+      - --head
+      - --port=6379
+      - --num-cpus=0
+      - --object-store-memory=200000000
+      - --include-dashboard=false
+      - --block
+    healthcheck:
+      test: ["CMD", "ray", "status"]
+      interval: 5s
+      timeout: 10s
+      retries: 12
+
+  # Each worker declares a resource with its own name so that a task can be
+  # sent to one specific worker (fault experiments, cross-worker artifacts).
+  worker-1:
+    <<: *worker
+    container_name: dpes-worker-1
+    hostname: worker-1
+    command:
+      - ray
+      - start
+      - --address=head:6379
+      - --num-cpus=2
+      - --object-store-memory=200000000
+      - '--resources={"worker-1": 1}'
+      - --block
+
+  worker-2:
+    <<: *worker
+    container_name: dpes-worker-2
+    hostname: worker-2
+    command:
+      - ray
+      - start
+      - --address=head:6379
+      - --num-cpus=2
+      - --object-store-memory=200000000
+      - '--resources={"worker-2": 1}'
+      - --block
+
+networks:
+  cluster: {}
