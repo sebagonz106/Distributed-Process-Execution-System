@@ -135,14 +135,22 @@ decisión aprobada requiere una decisión nueva que la sustituya.
   `plan/diagramas/<nombre>.mmd` + `.svg`; al cambiar la fuente hay que volver a
   generar la imagen (D05.1).
 
-Al empezar una fase se crea su documento con el siguiente número libre (D04.5);
-el de la Fase 0 será el 06.
+- [plan/06-fase-0-cimientos.md](plan/06-fase-0-cimientos.md): Fase 0. Los
+  contratos entre componentes viven en `dpes/messages.py` (D06.1) y se congelan
+  al cerrar la Fase 1. No se crean módulos vacíos (D06.6).
+
+Al empezar una fase se crea su documento con el siguiente número libre (D04.5).
+
+## Pruebas
+
+Desde la raíz del repo (D06.5): `py -m unittest discover -s tests/unit`
+(`python` en vez de `py` dentro de los contenedores).
 
 ## Estado
 
-Pasos 00–05 hechos: contexto, análisis, arquitectura, fases, calendario y
-diagramas. No hay
-código todavía. Siguiente: Fase 0.
+Fase 0 en curso (ver [PROGRESO.md](PROGRESO.md)). Hecha la parte de la persona
+A: paquete `dpes`, contratos y pruebas unitarias. Falta la parte de B (imagen,
+clúster, CI) y el experimento de fallos de Ray, que necesita el clúster.
 
 El usuario de estas sesiones (Juan Carlos) es la **persona A, pista de
 control** (D04.7): especificación, grafo, coordinador, clasificación de fallos,

@@ -6,14 +6,14 @@
 
 ## Avance
 
-`█░░░░░░░░░` **1 de 10** — plan aprobado, 0 de 9 fases cerradas
+`█░░░░░░░░░` **1 de 10** — plan aprobado, Fase 0 en curso, 0 de 9 fases cerradas
 
 ## Fases
 
 | | Fase | Está cerrada cuando… | Requisitos | Quién | Cierre |
 |:-:|------|----------------------|:----------:|:-----:|:------:|
 | ✅ | Plan | Análisis, arquitectura, fases, calendario y diagramas aprobados | — | A | 14 nov |
-| ⬜ | 0 · Cimientos | Clúster de 3 nodos, CI en verde, experimento de fallos de Ray | — | A y B | 16 nov |
+| 🟡 | 0 · Cimientos | Clúster de 3 nodos, CI en verde, experimento de fallos de Ray | — | A y B | 16 nov |
 | ⬜ | 1 · Una tarea | Se envía una tarea, corre aislada, se ve su estado y su salida | R1 R3 R5 | A y B | 18 nov |
 | ⬜ | 2 · DAG y recursos | Rombo en paralelo, ciclo rechazado, dependientes omitidos | R1 R2 | A | 21 nov |
 | ⬜ | 3 · Artefactos | Compila en un nodo, enlaza en otro, se descarga el binario | R3 R4 | B | 22 nov |
@@ -30,10 +30,18 @@
 | Estado | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
 | Se cumple al cerrar la fase | 2 | 2 | 3 | 3 | 4 | 5 | 6 | 5 | 7 |
 
-## Siguiente
+## Fase en curso: 0 · Cimientos
 
-**Fase 0.** A: estructura del paquete, contratos entre componentes, andamiaje de
-pruebas. B: imagen, clúster de contenedores, CI.
+| | Parte | Quién |
+|:-:|-------|:-----:|
+| ✅ | Estructura del paquete | A |
+| ✅ | Contratos entre componentes (propuestos, falta la revisión de B) | A |
+| ✅ | Andamiaje de pruebas: 10 pruebas unitarias en verde | A |
+| ⬜ | Imagen y clúster de contenedores | B |
+| ⬜ | Integración continua | B |
+| ⬜ | Experimento de fallos de Ray (necesita el clúster) | A y B |
+
+Decisiones de la fase: [plan/06-fase-0-cimientos.md](plan/06-fase-0-cimientos.md).
 
 ---
 
