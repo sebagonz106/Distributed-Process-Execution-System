@@ -9,9 +9,11 @@ COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 # Ray reports usage statistics by default; this project sends none.
+# PYTHONPATH lets the processes Ray starts on every node import dpes (D07.11).
 ENV RAY_USAGE_STATS_ENABLED=0 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
 
 WORKDIR /app
 COPY dpes dpes

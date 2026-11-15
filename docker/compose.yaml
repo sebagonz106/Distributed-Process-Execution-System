@@ -7,6 +7,7 @@ name: dpes
 
 x-worker: &worker
   image: dpes:dev
+  init: true  # reaps the orphans of killed task process groups (D07.19)
   shm_size: 1gb
   networks: [cluster]
   depends_on:
@@ -21,18 +22,22 @@ services:
       dockerfile: docker/Dockerfile
     container_name: dpes-head
     hostname: head
+    init: true
     shm_size: 1gb
     networks: [cluster]
-    # No CPUs: the control node coordinates, it never runs tasks.
+    # The gateway is the only published port, and only on this machine
+    # (plan/07, D07.18).
+    ports:
+      - "127.0.0.1:8000:8000"
+    # No CPUs: the control node coordinates, it never runs tasks. Ray starts
+    # first, then the gateway takes over as the container's main process.
     command:
-      - ray
-      - start
-      - --head
-      - --port=6379
-      - --num-cpus=0
-      - --object-store-memory=200000000
-      - --include-dashboard=false
-      - --block
+      - sh
+      - -c
+      - >-
+        ray start --head --port=6379 --num-cpus=0
+        --object-store-memory=200000000 --include-dashboard=false
+        && exec python -m dpes.gateway
     healthcheck:
       test: ["CMD", "ray", "status"]
       interval: 5s

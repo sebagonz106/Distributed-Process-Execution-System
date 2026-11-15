@@ -47,6 +47,7 @@ class TaskResult:
     timed_out: bool
     outputs: Mapping[str, str]  # declared path -> digest, only those produced
     missing_outputs: tuple[str, ...] = ()
+    output_tail: str = ""  # last bytes of stdout and stderr (plan/07, D07.14)
 
     @property
     def succeeded(self) -> bool:
