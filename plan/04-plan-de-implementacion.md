@@ -26,7 +26,7 @@ Quién hace qué y cuándo. Las fases y sus cortes (`C0`–`C8`) están definido
   hay conflictos al fusionar, y se encuentran solo en los contratos fijados en
   la Fase 0 (D03.3). Con (a) las dos personas editarían el coordinador a la vez.
   Con (b) el cliente es trivial y la carga queda descompensada.
-- **Pendiente del equipo:** decidir quién es A y quién es B.
+- **Quién es A y quién es B:** resuelto en D04.7.
 
 ### D04.2 — Supuesto de dedicación
 
@@ -77,6 +77,27 @@ continua (D03.4).
   no se programa.
 - **Porqué:** el camino crítico no tiene holgura. El margen se pone al final y
   se protege con una regla, porque un margen sin regla se gasta en features.
+
+### D04.7 — Juan Carlos lleva la pista de control (persona A)
+
+- **Contexto:** Juan Carlos desarrolla en Windows y pidió la pista que menos
+  dependa de Linux. Ray tiene soporte limitado en Windows y el espacio aislado
+  solo funciona en Linux.
+- **Decisión:** Juan Carlos es la persona A (pista de control). El otro
+  integrante del equipo es la persona B (pista de datos y plataforma).
+- **Porqué:** cinco de los módulos de la pista de control son puros (D02.16:
+  especificación, grafo, hashes, clasificador y máquina de estados) y la
+  pasarela y el cliente solo usan la biblioteca estándar; todo eso se programa y
+  se prueba en Windows con `py -m unittest`, sin Ray ni Linux. La pista B es la
+  que toca lo específico de Linux: la imagen, el espacio aislado (grupos de
+  procesos, límites del sistema), el ejecutor y la integración continua sobre
+  Ubuntu.
+- **Lo que A sigue necesitando de Linux:** el experimento de la Fase 0, la
+  envoltura del coordinador como actor de Ray y los guiones de extremo a
+  extremo. Los tres se ejecutan dentro de los contenedores con Docker en
+  Windows; no hace falta instalar Ubuntu.
+- **Consecuencia:** A depende de que B tenga la imagen y la composición
+  funcionando el domingo 15 para poder hacer el experimento del lunes 16.
 
 ## 2. Calendario
 
@@ -138,7 +159,7 @@ Son los días en que las dos pistas se tocan; conviene trabajar a la vez.
 
 ## 5. Aprobaciones
 
-El plan se aprobó tal como estaba el 2026-11-14. Queda un único asunto abierto.
+El plan se aprobó tal como estaba el 2026-11-14. No queda ningún asunto abierto.
 
 | Asunto | Resolución | Dónde se decide |
 |--------|------------|-----------------|
@@ -148,4 +169,4 @@ El plan se aprobó tal como estaba el 2026-11-14. Queda un único asunto abierto
 | Acciones de GitHub de terceros en la integración continua (obtener el código, instalar Python, construir y publicar la imagen) | Aprobado: solo las oficiales de GitHub y de Docker | D02.14 |
 | Analizador de estilo y medición de cobertura | No se usan | D02.13 |
 | Ramas con revisión cruzada para el código | Aprobado | D04.3 |
-| Quién es la persona A y quién la B | **Abierto:** lo decide el equipo | D04.1 |
+| Quién es la persona A y quién la B | Juan Carlos es A; el otro integrante es B | D04.7 |

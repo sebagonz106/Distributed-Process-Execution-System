@@ -81,7 +81,7 @@ No se añade alcance fuera de R1–R9 sin que el usuario lo pida.
 ## Convenciones
 
 - Documentación en español; identificadores, comentarios y mensajes de commit en
-  inglés (supuesto D0.2, pendiente de confirmar).
+  inglés (D0.2, confirmada).
 - Comentarios solo para el porqué que el código no puede mostrar.
 
 ## Recursos de la asignatura
@@ -133,5 +133,11 @@ Al empezar una fase se crea su documento con el siguiente número libre (D04.5).
 ## Estado
 
 Pasos 00–04 hechos: contexto, análisis, arquitectura, fases y calendario. No hay
-código todavía. Siguiente: Fase 0. Falta que el equipo decida quién es la
-persona A (pista de control) y quién la B (pista de datos y plataforma).
+código todavía. Siguiente: Fase 0.
+
+El usuario de estas sesiones (Juan Carlos) es la **persona A, pista de
+control** (D04.7): especificación, grafo, coordinador, clasificación de fallos,
+reintentos y confirmación. Trabaja en Windows: lo puro se prueba con
+`py -m unittest`; lo que necesita Ray se ejecuta en los contenedores. La pista
+de datos y plataforma (imagen, CI, espacio aislado, ejecutor, almacén, logs,
+caché) es del otro integrante; no tocar sus módulos sin acordarlo.

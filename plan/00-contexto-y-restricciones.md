@@ -84,7 +84,7 @@ No son decisiones del diseño: vienen dadas por el encargo y acotan todo lo dem�
   identificadores, comentarios y mensajes de commit en inglés.
 - **Porqué:** la asignatura y la orientación están en español; el ecosistema
   (Ray, Docker, CI) y el README existente del repo están en inglés.
-- **Estado:** supuesto pendiente de confirmar por el equipo.
+- **Estado:** confirmada el 2026-11-14.
 
 ## 5. Decisiones abiertas
 
