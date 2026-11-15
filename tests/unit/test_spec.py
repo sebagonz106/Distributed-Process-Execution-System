@@ -1,6 +1,13 @@
 import unittest
 
-from dpes.spec import DEFAULT_TIMEOUT_S, SpecError, TaskSpec, parse_job
+from dpes.spec import (
+    DEFAULT_TIMEOUT_S,
+    SpecError,
+    TaskSpec,
+    demand,
+    parse_job,
+    unschedulable,
+)
 
 
 def job(**task_fields):
@@ -28,7 +35,7 @@ class ValidJobTest(unittest.TestCase):
         self.assertEqual(("printf", ""), task.command)
 
 
-class RejectedJobTest(unittest.TestCase):
+class SpecTestCase(unittest.TestCase):
     def assertRejected(self, document, *fragments):
         with self.assertRaises(SpecError) as caught:
             parse_job(document)
@@ -37,16 +44,16 @@ class RejectedJobTest(unittest.TestCase):
             self.assertIn(fragment, joined)
         return caught.exception.errors
 
+
+class RejectedJobTest(SpecTestCase):
     def test_the_document_must_be_an_object(self):
         self.assertRejected(["not", "a", "job"], "job")
 
     def test_tasks_is_required(self):
         self.assertRejected({}, "tasks")
 
-    def test_a_job_needs_exactly_one_task_in_phase_1(self):
-        self.assertRejected({"tasks": {}}, "exactly one task")
-        two = {"tasks": {"a": {"command": ["true"]}, "b": {"command": ["true"]}}}
-        self.assertRejected(two, "exactly one task")
+    def test_a_job_needs_at_least_one_task(self):
+        self.assertRejected({"tasks": {}}, "at least one task")
 
     def test_task_names_are_limited_to_a_safe_alphabet(self):
         for name in ("", "has space", "a/b", "x" * 65):
@@ -77,7 +84,7 @@ class RejectedJobTest(unittest.TestCase):
         self.assertRejected({**job(), "extra": 1}, "extra")
 
     def test_fields_of_later_phases_are_rejected_until_they_exist(self):
-        self.assertRejected(job(needs=["build"]), "tasks.hello.needs")
+        self.assertRejected(job(inputs={"a.c": "x"}), "tasks.hello.inputs")
 
     def test_every_error_is_reported_at_once(self):
         errors = self.assertRejected(
@@ -87,6 +94,113 @@ class RejectedJobTest(unittest.TestCase):
             "tasks.hello.timeout_s",
         )
         self.assertEqual(3, len(errors))
+
+
+def tasks(**needs):
+    """A job whose tasks are `name=[dependencies]`."""
+    return {
+        "tasks": {
+            name: {"command": ["true"], "needs": deps}
+            for name, deps in needs.items()
+        }
+    }
+
+
+class DependenciesTest(SpecTestCase):
+    def test_dependencies_are_kept(self):
+        spec = parse_job(tasks(a=[], b=["a"], c=["a"], d=["b", "c"]))
+
+        self.assertEqual(4, len(spec.tasks))
+        self.assertEqual(("b", "c"), spec.tasks["d"].needs)
+        self.assertEqual((), spec.tasks["a"].needs)
+
+    def test_needs_must_be_a_list_of_names(self):
+        for needs in ("a", [1], {"a": True}):
+            with self.subTest(needs=needs):
+                document = tasks(a=[], b=needs)
+                self.assertRejected(document, "tasks.b.needs")
+
+    def test_a_dependency_must_be_a_task_of_the_job(self):
+        self.assertRejected(tasks(a=["ghost"]), "tasks.a.needs", "ghost")
+
+    def test_a_dependency_cannot_be_repeated(self):
+        self.assertRejected(tasks(a=[], b=["a", "a"]), "tasks.b.needs")
+
+    def test_a_cycle_is_rejected_naming_its_path(self):
+        document = tasks(a=["c"], b=["a"], c=["b"], d=[])
+
+        self.assertRejected(document, "dependency cycle a -> c -> b -> a")
+
+    def test_a_task_cannot_need_itself(self):
+        self.assertRejected(tasks(a=["a"]), "dependency cycle a -> a")
+
+
+class ResourcesTest(SpecTestCase):
+    def test_one_cpu_is_asked_for_by_default(self):
+        self.assertEqual({"cpu": 1.0}, parse_job(job()).tasks["hello"].resources)
+
+    def test_declared_resources_are_kept(self):
+        resources = {"cpu": 0.5, "memory_mb": 256, "gcc": 1}
+
+        task = parse_job(job(resources=resources)).tasks["hello"]
+
+        self.assertEqual(resources, task.resources)
+
+    def test_amounts_must_be_finite_numbers_above_zero(self):
+        for resources in (
+            {"cpu": 0}, {"cpu": "2"}, {"cpu": True}, {"cpu": float("inf")},
+            {"memory_mb": 0}, {"memory_mb": 1.5}, {"memory_mb": True},
+            {"gcc": 0}, [],
+        ):
+            with self.subTest(resources=resources):
+                document = job(resources=resources)
+                self.assertRejected(document, "tasks.hello.resources")
+
+    def test_capability_names_cannot_clash_with_ray_own_names(self):
+        for name in ("GPU", "has space", "memory", "object_store_memory"):
+            with self.subTest(name=name):
+                document = job(resources={name: 1})
+                self.assertRejected(document, f"tasks.hello.resources.{name}")
+
+
+WORKER_1 = {"CPU": 2.0, "memory": 4 * 2**30, "worker-1": 1.0}
+WORKER_2 = {"CPU": 2.0, "memory": 4 * 2**30, "worker-2": 1.0}
+CONTROL_NODE = {"memory": 4 * 2**30}
+
+
+class PlacementTest(unittest.TestCase):
+    def task(self, **resources):
+        return parse_job(job(resources=resources)).tasks["hello"]
+
+    def test_demand_is_expressed_in_ray_resource_names(self):
+        wanted = demand(self.task(cpu=2, memory_mb=1, gcc=1))
+
+        self.assertEqual({"CPU": 2, "memory": 2**20, "gcc": 1}, wanted)
+
+    def assertSchedulable(self, expected, **resources):
+        spec = parse_job(job(resources=resources))
+        errors = unschedulable(spec, [CONTROL_NODE, WORKER_1, WORKER_2])
+        self.assertEqual(expected, not errors, errors)
+
+    def test_a_task_that_fits_one_live_node_is_schedulable(self):
+        self.assertSchedulable(True, cpu=2)
+        self.assertSchedulable(True, cpu=1, **{"worker-2": 1})
+
+    def test_a_task_that_fits_no_node_is_not(self):
+        self.assertSchedulable(False, cpu=3)
+        self.assertSchedulable(False, gpu=1)
+        self.assertSchedulable(False, memory_mb=8 * 1024)
+
+    def test_resources_spread_over_two_nodes_do_not_add_up(self):
+        self.assertSchedulable(False, **{"worker-1": 1, "worker-2": 1})
+
+    def test_the_error_names_the_task_and_what_it_asks_for(self):
+        spec = parse_job(job(resources={"gpu": 1}))
+
+        (error,) = unschedulable(spec, [WORKER_1])
+
+        self.assertIn("tasks.hello.resources", error)
+        self.assertIn("gpu", error)
 
 
 if __name__ == "__main__":

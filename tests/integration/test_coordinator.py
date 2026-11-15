@@ -11,8 +11,8 @@ import unittest
 
 import ray
 
-from dpes.coordinator import Coordinator
-from dpes.spec import parse_job
+from dpes.coordinator import Coordinator, _Client
+from dpes.spec import SpecError, parse_job
 
 
 def one_task(*command):
@@ -94,6 +94,52 @@ class CoordinatorTest(unittest.TestCase):
 
     def test_an_unknown_job_has_no_status(self):
         self.assertIsNone(self.status("no-such-job"))
+
+    def run_dag(self, **tasks):
+        spec = parse_job({"tasks": tasks})
+        job_id = ray.get(self.coordinator.submit.remote(spec))
+        deadline = time.monotonic() + 60
+        view = self.status(job_id)
+        while view["state"] in ("PENDING", "RUNNING"):
+            self.assertLess(time.monotonic(), deadline, "the job never finished")
+            time.sleep(0.2)
+            view = self.status(job_id)
+        return view
+
+    def test_a_dag_runs_every_task_once_its_dependencies_succeed(self):
+        view = self.run_dag(
+            a={"command": ["0"]},
+            b={"command": ["0"], "needs": ["a"]},
+            c={"command": ["0"], "needs": ["a"]},
+            d={"command": ["0"], "needs": ["b", "c"]},
+        )
+
+        self.assertEqual("SUCCEEDED", view["state"])
+
+    def test_a_failure_skips_its_dependents_only(self):
+        view = self.run_dag(
+            a={"command": ["0"]},
+            b={"command": ["3"], "needs": ["a"]},
+            c={"command": ["0"], "needs": ["a"]},
+            d={"command": ["0"], "needs": ["b", "c"]},
+        )
+
+        states = {name: t["state"] for name, t in view["tasks"].items()}
+        self.assertEqual("FAILED", view["state"])
+        self.assertEqual(
+            {"a": "SUCCEEDED", "b": "FAILED", "c": "SUCCEEDED",
+             "d": "SKIPPED"},
+            states,
+        )
+
+    def test_a_job_no_live_node_can_run_is_refused_before_starting(self):
+        spec = parse_job({"tasks": {"t": {"command": ["0"],
+                                          "resources": {"gpu": 1}}}})
+
+        with self.assertRaises(SpecError) as caught:
+            _Client(self.coordinator).submit(spec)
+
+        self.assertIn("gpu", caught.exception.errors[0])
 
 
 if __name__ == "__main__":

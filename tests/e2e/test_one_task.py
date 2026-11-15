@@ -6,32 +6,10 @@ Run inside the control node, where the gateway listens (plan/07, D07.18):
         python -m unittest discover -s tests/e2e
 """
 
-import contextlib
-import io
-import json
-import os
-import tempfile
 import time
 import unittest
-import urllib.error
-import urllib.request
 
-from dpes import cli
-
-URL = "http://localhost:8000"
-
-
-def wait_for_gateway(timeout_s=60):
-    deadline = time.monotonic() + timeout_s
-    while True:
-        try:
-            urllib.request.urlopen(f"{URL}/jobs/none", timeout=2)
-        except urllib.error.HTTPError:
-            return  # it answered, so it is up
-        except OSError:
-            if time.monotonic() > deadline:
-                raise
-            time.sleep(1)
+from gateway_client import run_job, wait_for_gateway
 
 
 class OneTaskTest(unittest.TestCase):
@@ -39,21 +17,9 @@ class OneTaskTest(unittest.TestCase):
     def setUpClass(cls):
         wait_for_gateway()
 
-    def cli(self, *args):
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            code = cli.main(["--url", URL, *args])
-        return code, out.getvalue()
-
     def run_task(self, **task):
-        with tempfile.TemporaryDirectory() as directory:
-            path = os.path.join(directory, "job.json")
-            with open(path, "w", encoding="utf-8") as handle:
-                json.dump({"tasks": {"t": task}}, handle)
-            code, out = self.cli("submit", path)
-        self.assertEqual(0, code)
-        code, out = self.cli("wait", out.strip(), "--interval", "0.2")
-        return code, json.loads(out)["tasks"]["t"]
+        code, view = run_job({"t": task})
+        return code, view["tasks"]["t"]
 
     def test_a_successful_task_shows_its_output(self):
         code, task = self.run_task(

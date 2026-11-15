@@ -11,7 +11,7 @@ import urllib.request
 
 from dpes import cli
 from dpes.gateway import MAX_BODY, make_server
-from dpes.spec import JobSpec
+from dpes.spec import JobSpec, SpecError
 
 HELLO_JOB = {"tasks": {"hello": {"command": ["echo", "hi"]}}}
 
@@ -23,10 +23,13 @@ class FakeCoordinator:
         self.submitted = []
         self.views = {}  # job id -> snapshots returned in order, last repeats
         self.broken = False
+        self.unschedulable = []  # errors the cluster check would report
 
     def submit(self, spec):
         if self.broken:
             raise ConnectionError("coordinator unreachable")
+        if self.unschedulable:
+            raise SpecError(self.unschedulable)
         self.submitted.append(spec)
         return "job-1"
 
@@ -85,6 +88,14 @@ class GatewayTest(ServerTestCase):
         self.assertEqual(400, status)
         self.assertEqual(2, len(body["errors"]))
         self.assertEqual([], self.coordinator.submitted)
+
+    def test_a_job_no_node_can_run_is_rejected(self):
+        self.coordinator.unschedulable = ["tasks.hello.resources: no node"]
+
+        status, body = self.post_job(HELLO_JOB)
+
+        self.assertEqual((400, ["tasks.hello.resources: no node"]),
+                         (status, body.get("errors")))
 
     def test_a_body_that_is_not_json_is_rejected(self):
         status, body = self.request("POST", "/jobs", b"{not json")
@@ -145,7 +156,7 @@ class CliTest(ServerTestCase):
         code, _, err = self.run_cli("submit", self.write_job({"tasks": {}}))
 
         self.assertEqual(cli.EXIT_REQUEST_FAILED, code)
-        self.assertIn("exactly one task", err)
+        self.assertIn("at least one task", err)
 
     def test_status_prints_the_job_as_json(self):
         self.coordinator.views["job-1"] = [view("RUNNING")]

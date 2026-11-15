@@ -41,6 +41,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(400, {"errors": error.errors})
         try:
             job_id = self.server.coordinator.submit(spec)
+        except SpecError as error:  # valid, but no node could run it (D08.3)
+            return self._send(400, {"errors": error.errors})
         except Exception as error:  # whatever broke, the gateway stays up
             return self._unavailable(error)
         self._send(201, {"job_id": job_id})

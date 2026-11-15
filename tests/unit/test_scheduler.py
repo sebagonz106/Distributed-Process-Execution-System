@@ -136,5 +136,83 @@ class JobStateTest(unittest.TestCase):
         self.assertEqual(State.RUNNING, self.finish({"a": "ok", "b": "running"}))
 
 
+def dag_job(**needs):
+    """A job whose tasks are `name=[dependencies]`, in that order."""
+    tasks = {
+        name: TaskSpec(("true",), {}, 30.0, tuple(deps))
+        for name, deps in needs.items()
+    }
+    return Job("job-1", JobSpec(tasks))
+
+
+def names(attempts):
+    return [attempt.task for attempt in attempts]
+
+
+class DagTest(unittest.TestCase):
+    def setUp(self):
+        self.job = dag_job(a=[], b=["a"], c=["a"], d=["b", "c"])
+        self.eid = {attempt.task: attempt.execution_id
+                    for attempt in self.job.start()}
+
+    def succeed(self, task):
+        attempts = self.job.on_result(result(self.eid[task]))
+        self.eid.update({a.task: a.execution_id for a in attempts})
+        return names(attempts)
+
+    def fail(self, task):
+        attempts = self.job.on_result(result(self.eid[task], exit_code=1))
+        return names(attempts)
+
+    def state(self, task):
+        return self.job.view()["tasks"][task]["state"]
+
+    def test_only_tasks_without_dependencies_start(self):
+        self.assertEqual(["a"], list(self.eid))
+
+    def test_independent_tasks_are_launched_together(self):
+        self.assertEqual(["b", "c"], self.succeed("a"))
+
+    def test_a_task_waits_for_all_its_dependencies(self):
+        self.succeed("a")
+
+        self.assertEqual([], self.succeed("b"))
+        self.assertEqual("PENDING", self.state("d"))
+        self.assertEqual(["d"], self.succeed("c"))
+
+    def test_a_failure_skips_its_dependents_and_the_rest_goes_on(self):
+        self.succeed("a")
+
+        self.assertEqual([], self.fail("b"))
+        self.assertEqual("SKIPPED", self.state("d"))
+        self.assertIn("'b'", self.job.view()["tasks"]["d"]["error"])
+        self.assertEqual("RUNNING", self.state("c"))
+
+        self.assertEqual([], self.succeed("c"))
+        self.assertEqual(State.FAILED, self.job.state)
+
+    def test_skipping_reaches_every_transitive_dependent(self):
+        job = dag_job(a=[], b=["a"], c=["b"], x=[])
+        attempts = {a.task: a.execution_id for a in job.start()}
+
+        job.on_failure(attempts["a"], "WorkerCrashedError")
+
+        tasks = job.view()["tasks"]
+        self.assertEqual("SKIPPED", tasks["b"]["state"])
+        self.assertEqual("SKIPPED", tasks["c"]["state"])
+        self.assertEqual("RUNNING", tasks["x"]["state"])
+
+    def test_a_job_with_a_skipped_task_never_succeeds(self):
+        job = dag_job(a=[], b=["a"])
+        (attempt,) = job.start()
+
+        job.on_failure(attempt.execution_id, "lost")
+
+        self.assertEqual(State.ERROR, job.state)
+
+    def test_an_ignored_event_launches_nothing(self):
+        self.assertEqual([], self.job.on_result(result("job-1/a/0/99")))
+
+
 if __name__ == "__main__":
     unittest.main()
