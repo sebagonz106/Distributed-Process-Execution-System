@@ -76,7 +76,8 @@ No se añade alcance fuera de R1–R9 sin que el usuario lo pida.
 2. Escribir `plan/NN-*.md` con las decisiones.
 3. Pruebas primero, luego la implementación mínima.
 4. Revisión del diff y verificación (pruebas + CI) antes de afirmar que está hecho.
-5. Actualizar trazabilidad.
+5. Actualizar trazabilidad y [PROGRESO.md](PROGRESO.md), el tablero de un
+   vistazo: icono de la fase, barra y fecha.
 
 ## Convenciones
 
