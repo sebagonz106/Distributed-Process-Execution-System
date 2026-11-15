@@ -6,7 +6,7 @@
 
 ## Avance
 
-`████░░░░░░` **4 de 10** — plan aprobado, 3 de 9 fases cerradas
+`█████░░░░░` **5 de 10** — plan aprobado, 4 de 9 fases cerradas
 
 ## Fases
 
@@ -18,7 +18,7 @@
 | ✅ | 2 · DAG y recursos | Rombo en paralelo, ciclo rechazado, dependientes omitidos | R1 R2 | A | 15 nov |
 | ⬜ | 3 · Artefactos | Compila en un nodo, enlaza en otro, se descarga el binario | R3 R4 | B | 22 nov |
 | ⬜ | 4 · Logs | `logs -f` en vivo; el log sobrevive al trabajador muerto | R5 | B | 24 nov |
-| 🟡 | 5 · Fallos | Un guion por clase de fallo, con su reintento | R6 R8 | A | 25 nov |
+| ✅ | 5 · Fallos | Un guion por clase de fallo, con su reintento | R6 R8 | A | 15 nov |
 | ⬜ | 6 · Confirmación | El trabajador muere tras guardar: una sola ejecución | R7 | A | 27 nov |
 | ⬜ | 7 · Caché | Reenviar no ejecuta nada; cambiar un fichero recompila solo ese | R9 | B | 28 nov |
 | ⬜ | 8 · Entrega | Demo desde un clon limpio, imagen publicada | — | A y B | 30 nov |
@@ -27,25 +27,14 @@
 
 | | R1 | R2 | R3 | R4 | R5 | R6 | R7 | R8 | R9 |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| Estado | ✅ | ✅ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
+| Estado | ✅ | ✅ | ⬜ | ⬜ | ⬜ | ✅ | ⬜ | ✅ | ⬜ |
 | Se cumple al cerrar la fase | 2 | 2 | 3 | 3 | 4 | 5 | 6 | 5 | 7 |
 
-## Fase en curso: 5 · Fallos (adelantada a la 3 y la 4)
+## Siguiente: 3 · Artefactos (B)
 
-| | Parte | Quién |
-|:-:|-------|:-----:|
-| ✅ | Clasificador `TASK` / `WORKER` / `NETWORK` y política de reintentos | A |
-| ✅ | Presupuestos por tarea (`retries`) y esperas crecientes | A |
-| ✅ | Plazo por intento (de cola y de ejecución) | A |
-| ✅ | Fallos inyectables y prueba de caída real de un trabajador | A |
-| ✅ | Corte C5 en local | A |
-| ⬜ | CI en verde en GitHub (falta el push) | — |
-
-Pruebas: 125 unitarias, 12 de integración, 16 de extremo a extremo y 1 de
-caída real en verde. Decisiones:
-[plan/09-fase-5-fallos-y-reintentos.md](plan/09-fase-5-fallos-y-reintentos.md).
-
-Después: Fase 3 (artefactos, B). La Fase 6 (tuya) necesita la 3.
+Las fases de A que quedan dependen de ella: la 6 necesita el almacén de la 3.
+Pruebas hoy: 125 unitarias, 12 de integración, 16 de extremo a extremo y 1 de
+caída real en verde.
 
 Los contratos de `dpes/messages.py` quedaron congelados al cerrar la Fase 1
 sin que B los revisara; cambiarlos ahora requiere una decisión escrita

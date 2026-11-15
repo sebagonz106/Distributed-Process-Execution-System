@@ -190,13 +190,13 @@ Fase 2 cerrada el 2026-11-15, con el corte C2 en verde en la CI
 `dag.py`, despacho por tareas listas, omisión de dependientes y rechazo de lo
 que ningún nodo puede ejecutar. R1 y R2 cumplidos.
 
-Fase 5 hecha en local, adelantada a la 3 y la 4
+Fase 5 cerrada el 2026-11-15 con el corte C5 en verde en la CI (R6 y R8
+cumplidos), adelantada a la 3 y la 4
 ([plan/09](plan/09-fase-5-fallos-y-reintentos.md)): `failures.py`
 (clasificador y esperas), `retries` por tarea, `RETRY_WAIT`, historial de
 intentos en la vista, plazo de cola y de ejecución por intento, y fallos
 inyectables (`DPES_FAULT`, solo con `DPES_FAULT_INJECTION=1` en el
-trabajador). Se cierra cuando la CI pase en GitHub. Siguiente: Fase 3
-(artefactos, pista B); la Fase 6 la necesita.
+trabajador). Siguiente: Fase 3 (artefactos, pista B); la Fase 6 la necesita.
 
 Uso desde Windows con el clúster levantado:
 `py -m dpes.cli submit job.json`, `py -m dpes.cli wait <id>`.

@@ -1,7 +1,9 @@
 # 09 — Fase 5: clasificación de fallos y reintentos
 
 - **Fecha:** 2026-11-15
-- **Estado:** en curso
+- **Estado:** cerrada el 2026-11-15. El corte C5 pasó en la CI de GitHub
+  (ejecución 43740571857, commit `4406682`), incluida la caída real de un
+  trabajador. R6 y R8 quedan cumplidos.
 - **Paso:** Fase 5 de [03-fases-y-dependencias.md](03-fases-y-dependencias.md),
   adelantada a la Fase 3: solo dependía de la 2, ya cerrada
 - **Requisitos:** R6 (clasificación de fallos de tarea, trabajador y red) y R8

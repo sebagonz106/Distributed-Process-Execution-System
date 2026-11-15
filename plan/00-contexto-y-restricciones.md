@@ -40,9 +40,9 @@ identificador y debe quedar enlazada al paso que la resuelve y a sus pruebas.
 | R3 | Ejecución aislada en trabajadores | 1, 3 | planificado |
 | R4 | Transferencia de entradas y artefactos | 3 | planificado |
 | R5 | Registro y transmisión de logs | 1, 4 | planificado |
-| R6 | Clasificación de fallos de tarea, trabajador y red | 5 | planificado |
+| R6 | Clasificación de fallos de tarea, trabajador y red | 5 | cumplido (C5, 2026-11-15) |
 | R7 | Tratamiento del caso «la tarea terminó, pero se perdió la confirmación» | 6 | planificado |
-| R8 | Políticas de reintento según el tipo de fallo | 5 | planificado |
+| R8 | Políticas de reintento según el tipo de fallo | 5 | cumplido (C5, 2026-11-15) |
 | R9 | Caché basada en contenido para evitar trabajo idéntico cuando las entradas no cambian | 7 | planificado |
 
 Las features en que se descompone cada requisito están en
