@@ -147,11 +147,27 @@ Al empezar una fase se crea su documento con el siguiente número libre (D04.5).
 Desde la raíz del repo (D06.5): `py -m unittest discover -s tests/unit`
 (`python` en vez de `py` dentro de los contenedores).
 
+Clúster (un nodo de control y dos trabajadores, D06.7–D06.11). Docker Desktop
+tiene que estar en marcha:
+
+- Levantar: `docker compose -f docker/compose.yaml up -d --build`
+- Pruebas de extremo a extremo, dentro del nodo de control:
+  `docker compose -f docker/compose.yaml exec -T head python -m unittest discover -s tests/e2e`
+- Apagar: `docker compose -f docker/compose.yaml down`
+
+La CI (`.github/workflows/ci.yml`) corre las unitarias y luego las de extremo a
+extremo sobre el clúster en cada push (D06.12).
+
 ## Estado
 
-Fase 0 en curso (ver [PROGRESO.md](PROGRESO.md)). Hecha la parte de la persona
-A: paquete `dpes`, contratos y pruebas unitarias. Falta la parte de B (imagen,
-clúster, CI) y el experimento de fallos de Ray, que necesita el clúster.
+Fase 0 hecha en local (ver [PROGRESO.md](PROGRESO.md)): paquete `dpes`,
+contratos, imagen, clúster de tres nodos, CI y experimento de fallos de Ray. La
+persona A hizo también la parte de B en esta fase. Se da por cerrada cuando la
+CI pase en GitHub. Siguiente: Fase 1.
+
+Hallazgo que condiciona la Fase 5 (D06.14): Ray no avisa de un trabajador
+pausado o incomunicado; el plazo propio del coordinador por intento es la única
+señal de ese fallo.
 
 El usuario de estas sesiones (Juan Carlos) es la **persona A, pista de
 control** (D04.7): especificación, grafo, coordinador, clasificación de fallos,

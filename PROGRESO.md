@@ -35,11 +35,15 @@
 | | Parte | Quién |
 |:-:|-------|:-----:|
 | ✅ | Estructura del paquete | A |
-| ✅ | Contratos entre componentes (propuestos, falta la revisión de B) | A |
-| ✅ | Andamiaje de pruebas: 10 pruebas unitarias en verde | A |
-| ⬜ | Imagen y clúster de contenedores | B |
-| ⬜ | Integración continua | B |
-| ⬜ | Experimento de fallos de Ray (necesita el clúster) | A y B |
+| ✅ | Contratos entre componentes (propuestos, falta que B los acepte) | A |
+| ✅ | Andamiaje de pruebas: 10 unitarias y 2 de extremo a extremo en verde | A |
+| ✅ | Imagen y clúster de contenedores (3 nodos) | A, por B |
+| ✅ | Integración continua escrita | A, por B |
+| ✅ | Experimento de fallos de Ray | A |
+| ⬜ | CI en verde en GitHub (falta el primer push) | — |
+
+Hallazgo del experimento: con un trabajador pausado o sin red, Ray no avisa en
+3 minutos; el plazo propio del coordinador es la única señal (D06.14).
 
 Decisiones de la fase: [plan/06-fase-0-cimientos.md](plan/06-fase-0-cimientos.md).
 
