@@ -33,17 +33,22 @@ estado, registros y artefactos.
 La orientación se cumple al pie de la letra: cada funcionalidad tiene un
 identificador y debe quedar enlazada al paso que la resuelve y a sus pruebas.
 
-| ID | Funcionalidad (texto de la orientación) | Paso | Estado |
-|----|------------------------------------------|------|--------|
-| R1 | Recepción de trabajos con dependencias | — | pendiente |
-| R2 | Planificación de un grafo acíclico dirigido (DAG) de tareas | — | pendiente |
-| R3 | Ejecución aislada en trabajadores | — | pendiente |
-| R4 | Transferencia de entradas y artefactos | — | pendiente |
-| R5 | Registro y transmisión de logs | — | pendiente |
-| R6 | Clasificación de fallos de tarea, trabajador y red | — | pendiente |
-| R7 | Tratamiento del caso «la tarea terminó, pero se perdió la confirmación» | — | pendiente |
-| R8 | Políticas de reintento según el tipo de fallo | — | pendiente |
-| R9 | Caché basada en contenido para evitar trabajo idéntico cuando las entradas no cambian | — | pendiente |
+| ID | Funcionalidad (texto de la orientación) | Fases | Estado |
+|----|------------------------------------------|-------|--------|
+| R1 | Recepción de trabajos con dependencias | 1, 2 | planificado |
+| R2 | Planificación de un grafo acíclico dirigido (DAG) de tareas | 2 | planificado |
+| R3 | Ejecución aislada en trabajadores | 1, 3 | planificado |
+| R4 | Transferencia de entradas y artefactos | 3 | planificado |
+| R5 | Registro y transmisión de logs | 1, 4 | planificado |
+| R6 | Clasificación de fallos de tarea, trabajador y red | 5 | planificado |
+| R7 | Tratamiento del caso «la tarea terminó, pero se perdió la confirmación» | 6 | planificado |
+| R8 | Políticas de reintento según el tipo de fallo | 5 | planificado |
+| R9 | Caché basada en contenido para evitar trabajo idéntico cuando las entradas no cambian | 7 | planificado |
+
+Las features en que se descompone cada requisito están en
+[01-analisis-de-features.md](01-analisis-de-features.md); las fases y el corte
+que demuestra cada requisito, en
+[03-fases-y-dependencias.md](03-fases-y-dependencias.md).
 
 ## 3. Restricciones impuestas
 
@@ -83,21 +88,21 @@ No son decisiones del diseño: vienen dadas por el encargo y acotan todo lo dem�
 
 ## 5. Decisiones abiertas
 
-Se resuelven en los pasos siguientes; se listan aquí para que ninguna se tome
-por omisión.
+Se listaron aquí para que ninguna se tomara por omisión. Todas quedaron
+resueltas en [02-arquitectura.md](02-arquitectura.md), aprobado el 2026-11-14.
 
-| ID | Pregunta | Requisitos afectados |
-|----|----------|----------------------|
-| A1 | ¿Qué se delega en Ray y qué se implementa? Ray ya ofrece planificación, reintentos y almacén de objetos; si se usan tal cual, R6–R8 quedarían sin demostrar. | R2, R6, R7, R8 |
-| A2 | Mecanismo de aislamiento de la tarea: contenedor por tarea, o proceso con directorio de trabajo propio dentro del worker. | R3 |
-| A3 | Interfaz del cliente: CLI, API HTTP o ambas; formato de la especificación del trabajo. | R1 |
-| A4 | Almacén de artefactos y de la caché: clave de contenido (qué entra en el hash) y dónde vive. | R4, R9 |
-| A5 | Transmisión de logs: en vivo (streaming) y/o persistidos al terminar. | R5 |
-| A6 | Taxonomía de fallos y cómo se distingue cada clase con la evidencia disponible. | R6, R8 |
-| A7 | Identidad de la ejecución e idempotencia para la confirmación perdida. | R7 |
-| A8 | Dónde vive el estado del planificador y qué pasa si este cae. | R2, R7 |
-| A9 | Framework de pruebas (`unittest` de la biblioteca estándar por defecto) y plataforma de CI/CD (GitHub Actions, por estar el repo en GitHub). | — |
-| A10 | Topología de despliegue en Docker: nodos de Ray, redes y cómo se inyectan fallos para la demostración. | R6, R7 |
+| ID | Pregunta | Requisitos afectados | Resuelta en |
+|----|----------|----------------------|-----------|
+| A1 | ¿Qué se delega en Ray y qué se implementa? Ray ya ofrece planificación, reintentos y almacén de objetos; si se usan tal cual, R6–R8 quedarían sin demostrar. | R2, R6, R7, R8 | D02.1, D02.2 |
+| A2 | Mecanismo de aislamiento de la tarea: contenedor por tarea, o proceso con directorio de trabajo propio dentro del worker. | R3 | D02.5 |
+| A3 | Interfaz del cliente: CLI, API HTTP o ambas; formato de la especificación del trabajo. | R1 | D02.6, D01.2 |
+| A4 | Almacén de artefactos y de la caché: clave de contenido (qué entra en el hash) y dónde vive. | R4, R9 | D02.7, D02.12 |
+| A5 | Transmisión de logs: en vivo (streaming) y/o persistidos al terminar. | R5 | D02.8 |
+| A6 | Taxonomía de fallos y cómo se distingue cada clase con la evidencia disponible. | R6, R8 | D02.9, D02.11 |
+| A7 | Identidad de la ejecución e idempotencia para la confirmación perdida. | R7 | D02.10 |
+| A8 | Dónde vive el estado del planificador y qué pasa si este cae. | R2, R7 | D02.3, D02.4 |
+| A9 | Framework de pruebas (`unittest` de la biblioteca estándar por defecto) y plataforma de CI/CD (GitHub Actions, por estar el repo en GitHub). | — | D02.13, D02.14 |
+| A10 | Topología de despliegue en Docker: nodos de Ray, redes y cómo se inyectan fallos para la demostración. | R6, R7 | D02.15 |
 
 ## 6. Riesgos conocidos
 

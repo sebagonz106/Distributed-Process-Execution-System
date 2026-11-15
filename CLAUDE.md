@@ -42,7 +42,9 @@ No se añade alcance fuera de R1–R9 sin que el usuario lo pida.
 
 1. **Commits sin coautor.** Nunca añadir `Co-Authored-By`, «Generated with» ni
    ninguna atribución a IA en commits o PRs. El único autor es la identidad de
-   git local. Solo se hace commit o push cuando el usuario lo pide.
+   git local. Solo se hace commit o push cuando el usuario lo pide. La
+   documentación de `plan/` va directa a `main`; el código va en ramas de un día
+   como máximo, fusionadas con revisión de la otra persona y CI en verde (D04.3).
 2. **Stack:** Python + Ray. Docker para ejecutar y desplegar.
 3. **Librerías externas: preguntar siempre antes de usarlas.** Por defecto la
    única dependencia externa permitida es Ray; lo demás se resuelve con la
@@ -107,7 +109,29 @@ dentro del repo. Citar el material del curso en `plan/` cuando respalde una deci
   pruebas de integración corren en contenedores Linux.
 - `gh` autenticado con la cuenta del autor de los commits.
 
+## Plan vigente
+
+Leer antes de tocar código. Aprobado por el usuario el 2026-11-14; cambiar una
+decisión aprobada requiere una decisión nueva que la sustituya.
+
+- [plan/01-analisis-de-features.md](plan/01-analisis-de-features.md): features
+  `F<req>.<n>` por requisito con prioridad M/S/C/W y lo que queda fuera.
+- [plan/02-arquitectura.md](plan/02-arquitectura.md): modelo de fallos,
+  garantías S1–S4 y L1, y decisiones `D02.k`. Idea central: Ray como sustrato
+  (clúster, colocación, transporte) con cada intento como tarea de Ray **sin
+  reintentos**; orden, clasificación, reintentos, confirmación y caché son
+  código propio. El coordinador es un núcleo puro dentro de un actor.
+- [plan/03-fases-y-dependencias.md](plan/03-fases-y-dependencias.md): Fases 0–8,
+  cortes funcionales C0–C8, mapa de dependencias y línea de corte.
+- [plan/04-plan-de-implementacion.md](plan/04-plan-de-implementacion.md):
+  calendario para dos personas (pista de control y pista de datos), puntos de
+  control el 22 y el 26 de noviembre, congelación el 29, entrega el 1 de
+  diciembre de 2026.
+
+Al empezar una fase se crea su documento con el siguiente número libre (D04.5).
+
 ## Estado
 
-Paso 00 hecho: contexto y restricciones. No hay código todavía; la arquitectura
-(decisiones A1–A10) está sin decidir y se acuerda con el usuario antes de implementar.
+Pasos 00–04 hechos: contexto, análisis, arquitectura, fases y calendario. No hay
+código todavía. Siguiente: Fase 0. Falta que el equipo decida quién es la
+persona A (pista de control) y quién la B (pista de datos y plataforma).
