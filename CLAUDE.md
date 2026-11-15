@@ -42,9 +42,10 @@ No se añade alcance fuera de R1–R9 sin que el usuario lo pida.
 
 1. **Commits sin coautor.** Nunca añadir `Co-Authored-By`, «Generated with» ni
    ninguna atribución a IA en commits o PRs. El único autor es la identidad de
-   git local. Solo se hace commit o push cuando el usuario lo pide. La
-   documentación de `plan/` va directa a `main`; el código va en ramas de un día
-   como máximo, fusionadas con revisión de la otra persona y CI en verde (D04.3).
+   git local. Solo se hace commit o push cuando el usuario lo pide.
+   **No se hacen PR ni ramas: todo, código y documentación, se sube con push
+   directo a `main`** (D04.8, que sustituye a D04.3). Nunca abrir una solicitud
+   de cambio ni proponerla. La revisión del cambio se hace antes de subirlo.
 2. **Stack:** Python + Ray. Docker para ejecutar y desplegar.
 3. **Librerías externas: preguntar siempre antes de usarlas.** Por defecto la
    única dependencia externa permitida es Ray; lo demás se resuelve con la

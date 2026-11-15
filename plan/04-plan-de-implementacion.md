@@ -38,6 +38,8 @@ Quién hace qué y cuándo. Las fases y sus cortes (`C0`–`C8`) están definido
 
 ### D04.3 — Ramas cortas con revisión cruzada
 
+> **Sustituida por D04.8 el 2026-11-15.** Se conserva como registro.
+
 - **Opciones:** (a) todo directo a la rama principal; (b) una rama por feature o
   grupo pequeño de features, fusionada con solicitud de cambio revisada por la
   otra persona y con la integración continua en verde.
@@ -55,7 +57,7 @@ Una feature está hecha cuando se cumplen las cinco:
 1. Sus decisiones están escritas en el documento de su fase.
 2. Tiene pruebas unitarias que fallarían si la feature se rompiera.
 3. La integración continua pasa.
-4. La otra persona revisó el cambio.
+4. El cambio se revisó antes de subirlo (D04.8).
 5. La tabla de trazabilidad de `plan/00` está actualizada.
 
 Una fase está cerrada cuando su corte pasa como guion en la integración
@@ -98,6 +100,31 @@ continua (D03.4).
   Windows; no hace falta instalar Ubuntu.
 - **Consecuencia:** A depende de que B tenga la imagen y la composición
   funcionando el domingo 15 para poder hacer el experimento del lunes 16.
+
+### D04.8 — Sin ramas ni solicitudes de cambio: push directo a `main`
+
+- **Contexto:** D04.3 pedía ramas cortas fusionadas con solicitud de cambio,
+  revisión de la otra persona y CI en verde. Al abrir la primera (la n.º 1, con
+  los contratos de la Fase 0), el equipo decidió no trabajar así.
+- **Decisión** (Juan Carlos, 2026-11-15): no se abren solicitudes de cambio ni
+  se trabaja en ramas. Todo cambio, código o documentación, se sube con push
+  directo a `main`. **Sustituye a D04.3.**
+- **Porqué:** decisión del equipo; no quedó registrado un motivo. Lectura de
+  quien redacta, sin confirmar: con dos personas en pistas que casi no
+  comparten módulos (D04.1) y 16 días, esperar una revisión bloquea más de lo
+  que protege.
+- **Consecuencias:**
+  1. «Código revisado» sigue siendo una restricción del encargo. La revisión se
+     hace antes de subir: quien escribe el cambio revisa su diff y pasa las
+     pruebas. La otra persona puede revisarlo después, ya en `main`.
+  2. No hay barrera antes de `main`: la CI corre después del push. Si falla, se
+     corrige de inmediato con otro commit; no se reescribe la historia.
+  3. Las dos personas suben a la misma rama, así que hay que traer los cambios
+     del otro antes de subir.
+  4. Los contratos compartidos (D03.3) ya no pasan por una revisión formal: el
+     acuerdo sobre ellos se busca hablando, antes de congelarlos al cerrar la
+     Fase 1.
+- **Solicitud n.º 1:** cerrada sin fusionar; su commit se sube directo a `main`.
 
 ## 2. Calendario
 
@@ -151,7 +178,7 @@ Son los días en que las dos pistas se tocan; conviene trabajar a la vez.
 | Lo que Ray deja ver de un fallo no coincide con lo supuesto en D02.9 | Media | Rehacer la clasificación | Experimento el día 2 (D03.2); la taxonomía se ajusta antes de construir sobre ella |
 | Ray no funciona bien en las máquinas de desarrollo (Windows) | Alta | No se puede probar en local | Todo lo que usa Ray corre en contenedores; las pruebas puras no lo necesitan (D02.13) |
 | Las pruebas de fallos son inestables por depender de tiempos | Alta | Integración continua que falla sin motivo | Puntos de fallo deterministas dentro del ejecutor (D02.15); los fallos desde fuera se dejan para la demostración |
-| La integración continua tarda demasiado al levantar el clúster | Media | Ciclo de revisión lento | Las unitarias puras van primero y cortan pronto; los guiones de extremo a extremo solo en la rama principal y en solicitudes de cambio |
+| La integración continua tarda demasiado al levantar el clúster | Media | Ciclo de revisión lento | Las unitarias puras van primero y cortan pronto; los guiones de extremo a extremo corren después, sin bloquear ese primer aviso |
 | Una persona no está disponible varios días | Media | El camino crítico se detiene | Los contratos (D03.3) permiten que la otra continúe con dobles; se aplica la línea de corte |
 | Aparece alcance nuevo a mitad | Media | Se come el margen | La regla de `CLAUDE.md`: nada fuera de R1–R9 sin pedirlo; lo nuevo se anota y se decide en un punto de control |
 | El espacio aislado solo funciona en Linux | Segura | Sus pruebas no corren en Windows | Se marcan para saltarse fuera de Linux y se ejecutan en contenedor |
@@ -168,5 +195,5 @@ El plan se aprobó tal como estaba el 2026-11-14. No queda ningún asunto abiert
 | `gcc` y `make` en la imagen de trabajadores | Aprobado; son paquetes del sistema, no librerías de Python | D01.7 |
 | Acciones de GitHub de terceros en la integración continua (obtener el código, instalar Python, construir y publicar la imagen) | Aprobado: solo las oficiales de GitHub y de Docker | D02.14 |
 | Analizador de estilo y medición de cobertura | No se usan | D02.13 |
-| Ramas con revisión cruzada para el código | Aprobado | D04.3 |
+| Ramas con revisión cruzada para el código | Aprobado el 14 nov; sustituido el 15 nov por push directo a `main` | D04.3 → D04.8 |
 | Quién es la persona A y quién la B | Juan Carlos es A; el otro integrante es B | D04.7 |
