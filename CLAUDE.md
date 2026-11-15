@@ -151,19 +151,33 @@ Clúster (un nodo de control y dos trabajadores, D06.7–D06.11). Docker Desktop
 tiene que estar en marcha:
 
 - Levantar: `docker compose -f docker/compose.yaml up -d --build`
-- Pruebas de extremo a extremo, dentro del nodo de control:
-  `docker compose -f docker/compose.yaml exec -T head python -m unittest discover -s tests/e2e`
+- Pruebas de integración y de extremo a extremo, dentro del nodo de control:
+  `docker compose -f docker/compose.yaml exec -T head python -m unittest discover -s tests/integration`
+  (y lo mismo con `tests/e2e`). Tras cambiar código hay que volver a construir
+  la imagen (`up -d --build`): el código va copiado dentro, no montado.
 - Apagar: `docker compose -f docker/compose.yaml down`
 
-La CI (`.github/workflows/ci.yml`) corre las unitarias y luego las de extremo a
-extremo sobre el clúster en cada push (D06.12).
+La CI (`.github/workflows/ci.yml`) corre en cada push las unitarias fuera del
+contenedor y, sobre el clúster, las unitarias como `root`, las de integración y
+las de extremo a extremo (D06.12). Las pruebas del espacio aislado y del
+ejecutor necesitan Linux: en Windows se saltan.
 
 ## Estado
 
 Fase 0 cerrada el 2026-11-15, con la CI en verde en GitHub (ver
 [PROGRESO.md](PROGRESO.md)): paquete `dpes`, contratos, imagen, clúster de tres
 nodos, CI y experimento de fallos de Ray. La persona A hizo también la parte de
-B en esta fase. Siguiente: Fase 1.
+B en esta fase.
+
+Fase 1 hecha en local ([plan/07](plan/07-fase-1-una-tarea.md)): `spec.py`,
+`scheduler.py`, `gateway.py`, `cli.py`, `coordinator.py`, `sandbox.py` y
+`executor.py`; la pasarela arranca con el nodo de control en
+`127.0.0.1:8000`. La persona A hizo también la parte de B. Se cierra cuando la
+CI pase en GitHub. Límite conocido hasta la Fase 5: sin plazo por intento
+(D07.13).
+
+Uso desde Windows con el clúster levantado:
+`py -m dpes.cli submit job.json`, `py -m dpes.cli wait <id>`.
 
 Hallazgo que condiciona la Fase 5 (D06.14): Ray no avisa de un trabajador
 pausado o incomunicado; el plazo propio del coordinador por intento es la única
