@@ -181,10 +181,11 @@ también la parte de B. Los contratos de `dpes/messages.py` están congelados:
 cambiarlos requiere una decisión escrita. Límite conocido hasta la Fase 5: sin
 plazo por intento (D07.13).
 
-Fase 2 hecha en local ([plan/08](plan/08-fase-2-dag-y-recursos.md)): `needs`,
-`resources`, `dag.py`, despacho por tareas listas, omisión de dependientes y
-rechazo de lo que ningún nodo puede ejecutar. Se cierra cuando la CI pase en
-GitHub. Siguiente: Fase 3 (artefactos, pista B).
+Fase 2 cerrada el 2026-11-15, con el corte C2 en verde en la CI
+([plan/08](plan/08-fase-2-dag-y-recursos.md)): `needs`, `resources`,
+`dag.py`, despacho por tareas listas, omisión de dependientes y rechazo de lo
+que ningún nodo puede ejecutar. R1 y R2 cumplidos. Siguiente: Fase 3
+(artefactos, pista B); la Fase 5 (pista A) ya puede empezar.
 
 Uso desde Windows con el clúster levantado:
 `py -m dpes.cli submit job.json`, `py -m dpes.cli wait <id>`.

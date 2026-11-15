@@ -35,8 +35,8 @@ identificador y debe quedar enlazada al paso que la resuelve y a sus pruebas.
 
 | ID | Funcionalidad (texto de la orientación) | Fases | Estado |
 |----|------------------------------------------|-------|--------|
-| R1 | Recepción de trabajos con dependencias | 1, 2 | planificado |
-| R2 | Planificación de un grafo acíclico dirigido (DAG) de tareas | 2 | planificado |
+| R1 | Recepción de trabajos con dependencias | 1, 2 | cumplido (C2, 2026-11-15) |
+| R2 | Planificación de un grafo acíclico dirigido (DAG) de tareas | 2 | cumplido (C2, 2026-11-15) |
 | R3 | Ejecución aislada en trabajadores | 1, 3 | planificado |
 | R4 | Transferencia de entradas y artefactos | 3 | planificado |
 | R5 | Registro y transmisión de logs | 1, 4 | planificado |

@@ -1,7 +1,8 @@
 # 08 — Fase 2: DAG y recursos
 
 - **Fecha:** 2026-11-15
-- **Estado:** en curso
+- **Estado:** cerrada el 2026-11-15. El corte C2 pasó en la CI de GitHub
+  (ejecución 43736551521, commit `468b3b7`). R1 y R2 quedan cumplidos.
 - **Paso:** Fase 2 de [03-fases-y-dependencias.md](03-fases-y-dependencias.md)
 - **Requisitos:** R1 (recepción de trabajos con dependencias) y R2
   (planificación de un DAG de tareas)
