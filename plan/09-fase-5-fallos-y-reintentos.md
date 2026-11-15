@@ -153,7 +153,7 @@
   tumbar procesos del clúster a voluntad. La composición de este proyecto lo
   activa porque es el clúster de pruebas y demostración; se dice en ella.
 - **Desde fuera también:** la caída real de un contenedor se prueba con un
-  guion que corre en el anfitrión y usa Docker (`tests/chaos`), igual que el
+  guion que corre en el anfitrión y usa Docker (`tests/host`), igual que el
   experimento de la Fase 0.
 
 ### D09.8 — Se cierra D07.13
@@ -191,7 +191,7 @@ trabajo en `RUNNING` para siempre. L1 se cumple también ante esos fallos.
 | Unitarias (Linux) | `tests/unit/test_executor.py` | Cada fallo inyectable, que solo actúa con el interruptor y que un valor mal formado se ignora |
 | Integración | `tests/integration/test_coordinator.py` | Trabajador que muere una vez, intento colgado que agota el plazo de ejecución, intento atascado en la cola que agota el de cola, y ejecutor que rompe su contrato |
 | Extremo a extremo | `tests/e2e/test_failures.py` | **Corte C5** por la pasarela, con fallos inyectados: `TASK`, `WORKER`, `NETWORK` con esperas crecientes, plazo vencido y presupuesto agotado |
-| Caída real | `tests/chaos/test_worker_loss.py` | **Corte C5** desde fuera: se mata con Docker el contenedor que ejecuta la tarea; el fallo es `WORKER` y el reintento termina en el otro trabajador |
+| Caída real | `tests/host/test_worker_loss.py` | **Corte C5** desde fuera: se mata con Docker el contenedor que ejecuta la tarea; el fallo es `WORKER` y el reintento termina en el otro trabajador |
 
 Estado el 2026-11-15, todo en verde: 125 unitarias en el contenedor (106 en
 Windows), 12 de integración, 16 de extremo a extremo y la de caída real,
@@ -207,5 +207,5 @@ usa `subprocess`; se corrigió para que interceptara solo la del ejecutor.
 Para la de caída real, con el clúster levantado, desde la raíz del repositorio:
 
 ```
-py -m unittest discover -s tests/chaos
+py -m unittest discover -s tests/host
 ```

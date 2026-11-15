@@ -30,6 +30,12 @@
 | Estado | ✅ | ✅ | ⬜ | ⬜ | ⬜ | ✅ | ⬜ | ✅ | ⬜ |
 | Se cumple al cerrar la fase | 2 | 2 | 3 | 3 | 4 | 5 | 6 | 5 | 7 |
 
+## Transversal
+
+| | Qué | Quién |
+|:-:|-----|:-----:|
+| 🟡 | Sistema de logs descriptivo: hecho en local, falta la CI en GitHub ([plan/10](plan/10-sistema-de-logs.md)) | A |
+
 ## Siguiente: 3 · Artefactos (B)
 
 Las fases de A que quedan dependen de ella: la 6 necesita el almacén de la 3.

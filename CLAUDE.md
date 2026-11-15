@@ -145,6 +145,11 @@ decisión aprobada requiere una decisión nueva que la sustituya.
   Fases 1 y 2.
 - [plan/09-fase-5-fallos-y-reintentos.md](plan/09-fase-5-fallos-y-reintentos.md):
   Fase 5.
+- [plan/10-sistema-de-logs.md](plan/10-sistema-de-logs.md): logs operativos
+  de todo el sistema (pedido aparte de las fases). Regla para código nuevo: los
+  módulos con efectos registran con `dpes.log.event(logger, nivel, mensaje,
+  **campos)`, siempre con `execution=` o `job=`; los módulos puros no registran;
+  nunca se registra el entorno ni la salida de una tarea (D10.4–D10.6).
 
 Al empezar una fase se crea su documento con el siguiente número libre (D04.5).
 
@@ -161,8 +166,9 @@ tiene que estar en marcha:
   `docker compose -f docker/compose.yaml exec -T head python -m unittest discover -s tests/integration`
   (y lo mismo con `tests/e2e`). Tras cambiar código hay que volver a construir
   la imagen (`up -d --build`): el código va copiado dentro, no montado.
-- Caída real de un trabajador, desde el anfitrión (necesita Docker):
-  `py -m unittest discover -s tests/chaos`
+- Pruebas desde el anfitrión (necesitan Docker): caída real de un trabajador y
+  traza de logs de un trabajo: `py -m unittest discover -s tests/host`
+- Logs del sistema: `docker logs dpes-head 2>&1 | grep <id del trabajo>`
 - Apagar: `docker compose -f docker/compose.yaml down`
 
 La CI (`.github/workflows/ci.yml`) corre en cada push las unitarias fuera del
