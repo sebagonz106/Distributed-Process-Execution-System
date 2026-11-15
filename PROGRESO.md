@@ -6,14 +6,14 @@
 
 ## Avance
 
-`█░░░░░░░░░` **1 de 10** — plan aprobado, Fase 0 en curso, 0 de 9 fases cerradas
+`██░░░░░░░░` **2 de 10** — plan aprobado, 1 de 9 fases cerradas
 
 ## Fases
 
 | | Fase | Está cerrada cuando… | Requisitos | Quién | Cierre |
 |:-:|------|----------------------|:----------:|:-----:|:------:|
 | ✅ | Plan | Análisis, arquitectura, fases, calendario y diagramas aprobados | — | A | 14 nov |
-| 🟡 | 0 · Cimientos | Clúster de 3 nodos, CI en verde, experimento de fallos de Ray | — | A y B | 16 nov |
+| ✅ | 0 · Cimientos | Clúster de 3 nodos, CI en verde, experimento de fallos de Ray | — | A y B | 15 nov |
 | ⬜ | 1 · Una tarea | Se envía una tarea, corre aislada, se ve su estado y su salida | R1 R3 R5 | A y B | 18 nov |
 | ⬜ | 2 · DAG y recursos | Rombo en paralelo, ciclo rechazado, dependientes omitidos | R1 R2 | A | 21 nov |
 | ⬜ | 3 · Artefactos | Compila en un nodo, enlaza en otro, se descarga el binario | R3 R4 | B | 22 nov |
@@ -30,22 +30,17 @@
 | Estado | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ | ⬜ |
 | Se cumple al cerrar la fase | 2 | 2 | 3 | 3 | 4 | 5 | 6 | 5 | 7 |
 
-## Fase en curso: 0 · Cimientos
+## Siguiente: 1 · Una tarea
 
-| | Parte | Quién |
-|:-:|-------|:-----:|
-| ✅ | Estructura del paquete | A |
-| ✅ | Contratos entre componentes (propuestos, falta que B los acepte) | A |
-| ✅ | Andamiaje de pruebas: 10 unitarias y 2 de extremo a extremo en verde | A |
-| ✅ | Imagen y clúster de contenedores (3 nodos) | A, por B |
-| ✅ | Integración continua escrita | A, por B |
-| ✅ | Experimento de fallos de Ray | A |
-| ⬜ | CI en verde en GitHub (falta el primer push) | — |
+A: especificación de una tarea, pasarela HTTP, cliente, coordinador mínimo.
+B: espacio aislado y ejecutor.
 
-Hallazgo del experimento: con un trabajador pausado o sin red, Ray no avisa en
-3 minutos; el plazo propio del coordinador es la única señal (D06.14).
+Pendiente de la Fase 0: que B acepte los contratos de `dpes/messages.py` antes
+de que se congelen al cerrar la Fase 1.
 
-Decisiones de la fase: [plan/06-fase-0-cimientos.md](plan/06-fase-0-cimientos.md).
+Hallazgo de la Fase 0: con un trabajador pausado o sin red, Ray no avisa en
+3 minutos; el plazo propio del coordinador es la única señal
+([plan/06](plan/06-fase-0-cimientos.md), D06.14).
 
 ---
 

@@ -1,8 +1,8 @@
 # 06 — Fase 0: cimientos y experimento con Ray
 
 - **Fecha:** 2026-11-15
-- **Estado:** cerrada el 2026-11-15 en local; el corte C0 en la CI se
-  confirma con el primer push
+- **Estado:** cerrada el 2026-11-15. El corte C0 pasó en la CI de GitHub
+  (ejecución 43688722554, commit `742fe91`)
 - **Paso:** Fase 0 de [03-fases-y-dependencias.md](03-fases-y-dependencias.md)
 - **Corte:** C0
 

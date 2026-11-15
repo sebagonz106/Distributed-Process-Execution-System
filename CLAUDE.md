@@ -160,10 +160,10 @@ extremo sobre el clúster en cada push (D06.12).
 
 ## Estado
 
-Fase 0 hecha en local (ver [PROGRESO.md](PROGRESO.md)): paquete `dpes`,
-contratos, imagen, clúster de tres nodos, CI y experimento de fallos de Ray. La
-persona A hizo también la parte de B en esta fase. Se da por cerrada cuando la
-CI pase en GitHub. Siguiente: Fase 1.
+Fase 0 cerrada el 2026-11-15, con la CI en verde en GitHub (ver
+[PROGRESO.md](PROGRESO.md)): paquete `dpes`, contratos, imagen, clúster de tres
+nodos, CI y experimento de fallos de Ray. La persona A hizo también la parte de
+B en esta fase. Siguiente: Fase 1.
 
 Hallazgo que condiciona la Fase 5 (D06.14): Ray no avisa de un trabajador
 pausado o incomunicado; el plazo propio del coordinador por intento es la única
