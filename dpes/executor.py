@@ -4,40 +4,56 @@ The coordinator turns `execute` into a Ray task. It returns, never raises,
 a TaskResult or an ExecutorFailure (plan/06, D06.3).
 """
 
+import logging
 import os
 import shutil
+import socket
 import tempfile
 import time
 
 from dpes import sandbox
+from dpes.log import event
 from dpes.messages import Attempt, Evidence, ExecutorFailure, TaskResult
 
 _HANG_S = 3600  # longer than any deadline: the coordinator cancels first
+_log = logging.getLogger(__name__)
 
 
 def execute(attempt: Attempt):
+    eid = attempt.execution_id
+    # Program and argument count only: arguments and env may hold secrets.
+    event(_log, logging.INFO, "attempt running", execution=eid,
+          host=socket.gethostname(), program=attempt.command[0],
+          args=len(attempt.command) - 1)
     fault = _injected_fault(attempt)
+    if fault:
+        event(_log, logging.WARNING, "injected fault", execution=eid,
+              kind=fault)
     if fault == "crash":
         os._exit(1)
     if fault == "hang":
         _hang()
     if fault == "network":
         return ExecutorFailure(
-            attempt.execution_id, Evidence.INPUT_UNAVAILABLE, "injected fault"
+            eid, Evidence.INPUT_UNAVAILABLE, "injected fault"
         )
 
     try:
         workspace = tempfile.mkdtemp(prefix="dpes-")
     except OSError as error:
-        return ExecutorFailure(
-            attempt.execution_id, Evidence.WORKSPACE_FAILED, str(error)
-        )
+        event(_log, logging.ERROR, "no workspace", execution=eid,
+              error=str(error))
+        return ExecutorFailure(eid, Evidence.WORKSPACE_FAILED, str(error))
+    started = time.monotonic()
     try:
         outcome = sandbox.run(
             attempt.command, attempt.env, attempt.timeout_s, workspace
         )
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
+    event(_log, logging.INFO, "command finished", execution=eid,
+          exit_code=outcome.exit_code, timed_out=outcome.timed_out,
+          duration_s=round(time.monotonic() - started, 3))
     return TaskResult(
         execution_id=attempt.execution_id,
         exit_code=outcome.exit_code,

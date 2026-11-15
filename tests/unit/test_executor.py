@@ -9,6 +9,7 @@ if sys.platform != "linux":
     raise unittest.SkipTest("the executor needs Linux process groups")
 
 from dpes.executor import execute  # imported after the skip: it needs Linux
+from dpes.log import Formatter
 from dpes.messages import Attempt, Evidence, ExecutorFailure, TaskResult
 
 
@@ -56,6 +57,48 @@ class ExecuteTest(unittest.TestCase):
 
         self.assertIsInstance(outcome, ExecutorFailure)
         self.assertEqual(Evidence.WORKSPACE_FAILED, outcome.evidence)
+
+
+class ExecutorLogTest(unittest.TestCase):
+    def logged(self, level, run):
+        with self.assertLogs("dpes.executor", level) as caught:
+            run()
+        return caught.records
+
+    def test_an_attempt_logs_where_it_ran_and_how_it_ended(self):
+        records = self.logged("INFO", lambda: execute(attempt("exit 4")))
+
+        running, finished = records
+        self.assertEqual("attempt running", running.getMessage())
+        self.assertEqual("job-1/t/0/1", running.fields["execution"])
+        self.assertIn("host", running.fields)
+        self.assertEqual("command finished", finished.getMessage())
+        self.assertEqual(4, finished.fields["exit_code"])
+        self.assertEqual("job-1/t/0/1", finished.fields["execution"])
+
+    def test_neither_the_environment_nor_the_output_reaches_the_log(self):
+        secret = attempt("echo printed-output", env={"TOKEN": "hunter2"})
+
+        records = self.logged("DEBUG", lambda: execute(secret))
+
+        text = "\n".join(Formatter().format(r) for r in records)
+        self.assertNotIn("hunter2", text)
+        self.assertNotIn("printed-output", text)
+
+    def test_no_workspace_is_an_error(self):
+        with mock.patch("tempfile.tempdir", "/nonexistent/dpes"):
+            records = self.logged("ERROR", lambda: execute(attempt("true")))
+
+        self.assertEqual("no workspace", records[0].getMessage())
+
+    @mock.patch.dict(os.environ, {"DPES_FAULT_INJECTION": "1"})
+    def test_an_injected_fault_is_a_warning(self):
+        faulty = attempt("true", env={"DPES_FAULT": "network:1"})
+
+        records = self.logged("WARNING", lambda: execute(faulty))
+
+        self.assertEqual(("injected fault", "network"),
+                         (records[0].getMessage(), records[0].fields["kind"]))
 
 
 class Stopped(Exception):

@@ -27,6 +27,10 @@ services:
     container_name: dpes-head
     hostname: head
     init: true
+    # Ray would fold log lines that differ only in numbers, and execution ids
+    # are full of numbers (plan/10, D10.7).
+    environment:
+      RAY_DEDUP_LOGS: "0"
     shm_size: 1gb
     networks: [cluster]
     # The gateway is the only published port, and only on this machine

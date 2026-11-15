@@ -4,7 +4,7 @@ Runs on the host, not in the cluster: it needs the Docker CLI to kill the
 container, and reaches the gateway on its published port (plan/09, D09.7).
 With the cluster up, from the repository root:
 
-    python -m unittest discover -s tests/chaos
+    python -m unittest discover -s tests/host
 """
 
 import contextlib

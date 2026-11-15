@@ -132,6 +132,41 @@ class GatewayTest(ServerTestCase):
         self.assertEqual(503, self.request("GET", "/jobs/job-1")[0])
 
 
+class GatewayLogTest(ServerTestCase):
+    def logged(self, level, *request):
+        with self.assertLogs("dpes.gateway", level) as caught:
+            self.request(*request)
+        return caught.records
+
+    def test_an_accepted_job_is_logged_with_its_id(self):
+        (record,) = self.logged("INFO", "POST", "/jobs",
+                                json.dumps(HELLO_JOB).encode())
+
+        self.assertEqual("job accepted", record.getMessage())
+        self.assertEqual({"job": "job-1", "tasks": 1}, record.fields)
+
+    def test_a_rejected_job_is_a_warning_naming_the_first_error(self):
+        body = json.dumps({"tasks": {}}).encode()
+
+        (record,) = self.logged("WARNING", "POST", "/jobs", body)
+
+        self.assertEqual("job rejected", record.getMessage())
+        self.assertIn("at least one task", record.fields["first"])
+
+    def test_an_unreachable_coordinator_is_an_error(self):
+        self.coordinator.broken = True
+
+        (record,) = self.logged("ERROR", "GET", "/jobs/job-1")
+
+        self.assertEqual("coordinator unavailable", record.getMessage())
+
+    def test_status_polling_stays_below_info(self):
+        self.coordinator.views["job-1"] = [view("RUNNING")]
+
+        with self.assertNoLogs("dpes.gateway", "INFO"):
+            self.request("GET", "/jobs/job-1")
+
+
 class CliTest(ServerTestCase):
     def run_cli(self, *args):
         out, err = io.StringIO(), io.StringIO()

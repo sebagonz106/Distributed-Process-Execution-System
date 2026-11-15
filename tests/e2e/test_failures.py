@@ -1,7 +1,7 @@
 """Cut C5: every failure class, its evidence and its retry (plan/09).
 
 Faults are injected from inside the executor (D09.7). The real loss of a
-worker container is in tests/chaos, which needs Docker on the host.
+worker container is in tests/host, which needs Docker on the host.
 
     docker compose -f docker/compose.yaml exec -T head \
         python -m unittest discover -s tests/e2e

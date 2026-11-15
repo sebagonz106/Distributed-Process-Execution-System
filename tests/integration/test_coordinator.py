@@ -48,8 +48,9 @@ class CoordinatorTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         # Tolerant: tearDownClass does not run if a setUpClass fails.
+        # Quiet: these check states; tests/host checks the logs.
         ray.init(address="auto", logging_level="ERROR",
-                 ignore_reinit_error=True)
+                 ignore_reinit_error=True, log_to_driver=False)
         cls.coordinator = Coordinator.remote(
             stand_in_executor, queue_timeout_s=cls.queue_timeout_s
         )
