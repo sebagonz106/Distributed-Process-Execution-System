@@ -37,6 +37,9 @@ documentos se contradicen, mandan los documentos.
 
 ### D05.3 — Nombres de los estados de una tarea
 
+> **Resuelta en la Fase 2 por D08.4:** `READY` no se adopta; el resto de
+> nombres se mantiene. El diagrama de estados se regeneró el 2026-11-15.
+
 - **Decisión (propuesta):** `PENDING`, `READY`, `RUNNING`, `RETRY_WAIT` y los
   finales `SUCCEEDED`, `FAILED`, `ERROR`, `SKIPPED`.
 - **Porqué:** los cuatro finales ya estaban fijados (D01.4, D01.5). Los
@@ -61,16 +64,17 @@ fase (D04.1, D04.7). Fuente de verdad: 03 §3.
 
 ![Dependencias entre módulos](diagramas/dependencias-modulos.svg)
 
-Flecha continua: un módulo importa a otro. Flecha discontinua: se comunican por
-mensajes entre procesos. Los cinco módulos en amarillo no importan Ray ni tocan
-disco (D02.3), y nada apunta desde ellos hacia fuera: por eso se pueden probar
-solos.
+Regenerado el 2026-11-15, al cerrar la Fase 1 y durante la Fase 2. Flecha
+continua: un módulo importa a otro. Flecha de puntos entre módulos existentes:
+se comunican por mensajes entre procesos. Recuadro y flecha discontinuos: módulo
+previsto para una fase posterior.
 
-Lo que el diagrama deja fuera a propósito: el ejecutor también habla por
-mensajes con el almacén (blobs y resultado) y con el registro de logs. D02.16 no
-asigna todavía un módulo a las envolturas de esos dos actores; se decide en las
-Fases 3 y 4. Las dependencias dibujadas son las previstas y se ajustan al
-implementar.
+Los cuatro módulos en amarillo no importan Ray ni tocan disco (D02.3), y nada
+apunta desde ellos hacia fuera: por eso se pueden probar solos. Respecto a la
+primera versión del diagrama cambiaron tres cosas: los contratos viven en
+`messages.py` (D06.1); el ejecutor no conoce Ray, es el coordinador quien lo
+convierte en tarea de Ray (D07.17); y `spec.py` usa `dag.py`, no al revés
+(D08.7).
 
 ## 3. Flujos de la aplicación en funcionamiento
 
@@ -103,7 +107,9 @@ recargarlo.
 
 ![Estados de una tarea](diagramas/estados-tarea.svg)
 
-Ver D05.3. «Código 0» incluye el resultado adoptado por reconciliación.
+Ver D05.3 y D08.4. Las transiciones discontinuas llegan en fases posteriores:
+los reintentos en la Fase 5 y la caché en la Fase 7. «Código 0» incluirá el
+resultado adoptado por reconciliación (Fase 6).
 
 ### ¿Qué pasa si la tarea terminó pero la confirmación se perdió?
 

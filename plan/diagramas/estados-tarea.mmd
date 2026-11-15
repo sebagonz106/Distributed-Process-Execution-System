@@ -1,7 +1,6 @@
 flowchart LR
   inicio(["trabajo aceptado"])
   PENDING(["PENDING"])
-  READY(["READY"])
   RUNNING(["RUNNING"])
   RETRY_WAIT(["RETRY_WAIT"])
   SUCCEEDED(["SUCCEEDED"])
@@ -10,23 +9,24 @@ flowchart LR
   SKIPPED(["SKIPPED"])
 
   inicio --> PENDING
-  PENDING -- "dependencias con éxito" --> READY
+  PENDING -- "dependencias con éxito:<br/>intento lanzado" --> RUNNING
   PENDING -- "una dependencia sin éxito" --> SKIPPED
-  READY -- "acierto de caché" --> SUCCEEDED
-  READY -- "intento lanzado" --> RUNNING
+  PENDING -. "acierto de caché (Fase 7)" .-> SUCCEEDED
   RUNNING -- "código 0" --> SUCCEEDED
-  RUNNING -- "fallo reintentable" --> RETRY_WAIT
-  RETRY_WAIT -- "intento nuevo" --> RUNNING
-  RUNNING -- "fallo de tarea definitivo" --> FAILED
-  RUNNING -- "fallo de infraestructura definitivo" --> ERROR
+  RUNNING -. "fallo reintentable (Fase 5)" .-> RETRY_WAIT
+  RETRY_WAIT -. "intento nuevo" .-> RUNNING
+  RUNNING -- "fallo de la tarea" --> FAILED
+  RUNNING -- "fallo de infraestructura" --> ERROR
 
   classDef ok fill:#dcfce7,stroke:#15803d,color:#111827
   classDef mal fill:#fee2e2,stroke:#b91c1c,color:#111827
   classDef infra fill:#ffedd5,stroke:#c2410c,color:#111827
   classDef omitida fill:#f3f4f6,stroke:#374151,color:#111827
+  classDef previsto fill:#ffffff,stroke:#9ca3af,color:#6b7280,stroke-dasharray:5 4
   classDef entrada fill:#ffffff,stroke:#9ca3af,color:#374151,stroke-dasharray:4 3
   class SUCCEEDED ok
   class FAILED mal
   class ERROR infra
   class SKIPPED omitida
+  class RETRY_WAIT previsto
   class inicio entrada

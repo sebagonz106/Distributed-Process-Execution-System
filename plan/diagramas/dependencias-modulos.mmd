@@ -1,43 +1,49 @@
 flowchart TD
   cli["cli.py<br/>cliente de línea de comandos<br/>(cliente)"]
   gateway["gateway.py<br/>API HTTP<br/>(nodo de control)"]
-  coordinator["coordinator.py<br/>actor de Ray<br/>(nodo de control)"]
-  executor["executor.py<br/>tarea de Ray<br/>(nodo trabajador)"]
-  store["store.py<br/>SQLite: estado, resultados,<br/>caché, eventos"]
-  cas["cas.py<br/>blobs en disco"]
-  sandbox["sandbox.py<br/>espacio aislado"]
+  coordinator["coordinator.py<br/>actor de Ray y adaptador<br/>(nodo de control)"]
+  executor["executor.py<br/>un intento<br/>(trabajador)"]
+  sandbox["sandbox.py<br/>espacio aislado<br/>(trabajador)"]
   scheduler["scheduler.py<br/>máquina de estados"]
-  dag["dag.py<br/>grafo y orden"]
-  spec["spec.py<br/>modelo y validación"]
+  spec["spec.py<br/>formato, validación<br/>y recursos"]
+  dag["dag.py<br/>ciclos"]
+  messages["messages.py<br/>contratos"]
+  store["store.py<br/>resultados y caché"]
+  cas["cas.py<br/>blobs"]
   failures["failures.py<br/>clasificador y política"]
-  hashing["hashing.py<br/>digests y clave de acción"]
+  hashing["hashing.py<br/>digests"]
 
   cli -. "HTTP" .-> gateway
-  gateway -. "mensajes" .-> coordinator
-  coordinator -. "lanza intentos" .-> executor
+  gateway -. "llama" .-> coordinator
+  coordinator -- "lo lanza como tarea de Ray" --> executor
 
   gateway --> spec
   coordinator --> scheduler
-  coordinator --> store
+  coordinator --> spec
+  scheduler --> spec
+  scheduler --> messages
+  spec --> dag
   executor --> sandbox
-  executor --> hashing
-  cli --> hashing
-  cas --> hashing
-  scheduler --> dag
-  scheduler --> failures
-  scheduler --> hashing
-  dag --> spec
+  executor --> messages
+
+  coordinator -.-> store
+  scheduler -.-> failures
+  executor -.-> cas
+  cas -.-> hashing
 
   subgraph LEYENDA["Leyenda"]
     direction LR
     L1["Puro: sin Ray,<br/>sin disco, sin reloj"]
     L2["Usa Ray"]
-    L3["Disco, red<br/>o procesos"]
+    L3["Procesos, red<br/>o disco"]
+    L4["Previsto en<br/>fases posteriores"]
   end
 
   classDef puro fill:#fef9c3,stroke:#a16207,color:#111827
   classDef ray fill:#dbeafe,stroke:#1d4ed8,color:#111827
   classDef io fill:#f3f4f6,stroke:#374151,color:#111827
-  class scheduler,dag,spec,failures,hashing,L1 puro
-  class coordinator,executor,L2 ray
-  class cli,gateway,store,cas,sandbox,L3 io
+  classDef previsto fill:#ffffff,stroke:#9ca3af,color:#6b7280,stroke-dasharray:5 4
+  class scheduler,spec,dag,messages,L1 puro
+  class coordinator,L2 ray
+  class cli,gateway,executor,sandbox,L3 io
+  class store,cas,failures,hashing,L4 previsto

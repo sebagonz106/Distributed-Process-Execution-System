@@ -140,6 +140,10 @@ decisión aprobada requiere una decisión nueva que la sustituya.
   contratos entre componentes viven en `dpes/messages.py` (D06.1) y se congelan
   al cerrar la Fase 1. No se crean módulos vacíos (D06.6).
 
+- [plan/07-fase-1-una-tarea.md](plan/07-fase-1-una-tarea.md) y
+  [plan/08-fase-2-dag-y-recursos.md](plan/08-fase-2-dag-y-recursos.md):
+  Fases 1 y 2.
+
 Al empezar una fase se crea su documento con el siguiente número libre (D04.5).
 
 ## Pruebas
@@ -175,7 +179,12 @@ Fase 1 cerrada el 2026-11-15, con el corte C1 en verde en la CI
 pasarela arranca con el nodo de control en `127.0.0.1:8000`. La persona A hizo
 también la parte de B. Los contratos de `dpes/messages.py` están congelados:
 cambiarlos requiere una decisión escrita. Límite conocido hasta la Fase 5: sin
-plazo por intento (D07.13). Siguiente: Fase 2 (A) y Fase 3 (B), en paralelo.
+plazo por intento (D07.13).
+
+Fase 2 hecha en local ([plan/08](plan/08-fase-2-dag-y-recursos.md)): `needs`,
+`resources`, `dag.py`, despacho por tareas listas, omisión de dependientes y
+rechazo de lo que ningún nodo puede ejecutar. Se cierra cuando la CI pase en
+GitHub. Siguiente: Fase 3 (artefactos, pista B).
 
 Uso desde Windows con el clúster levantado:
 `py -m dpes.cli submit job.json`, `py -m dpes.cli wait <id>`.
