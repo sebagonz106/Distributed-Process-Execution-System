@@ -1,7 +1,8 @@
 # 10 — Sistema de logs descriptivo
 
 - **Fecha:** 2026-11-15
-- **Estado:** hecho en local el 2026-11-15; falta que la CI pase en GitHub
+- **Estado:** hecho el 2026-11-15. La traza de un trabajo pasó en la CI de
+  GitHub (ejecución 43747750827, commit `dce851f`)
 - **Paso:** transversal, pedido aparte de las fases («además del proyecto»)
 
 ## 1. Qué es y qué no es

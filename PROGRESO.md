@@ -34,7 +34,7 @@
 
 | | Qué | Quién |
 |:-:|-----|:-----:|
-| 🟡 | Sistema de logs descriptivo: hecho en local, falta la CI en GitHub ([plan/10](plan/10-sistema-de-logs.md)) | A |
+| ✅ | Sistema de logs descriptivo, con la traza de un trabajo verificada en la CI ([plan/10](plan/10-sistema-de-logs.md)) | A |
 
 ## Siguiente: 3 · Artefactos (B)
 
