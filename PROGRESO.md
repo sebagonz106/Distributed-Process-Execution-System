@@ -16,7 +16,7 @@
 | ✅ | 0 · Cimientos | Clúster de 3 nodos, CI en verde, experimento de fallos de Ray | — | A y B | 15 nov |
 | ✅ | 1 · Una tarea | Se envía una tarea, corre aislada, se ve su estado y su salida | R1 R3 R5 | A y B | 15 nov |
 | ✅ | 2 · DAG y recursos | Rombo en paralelo, ciclo rechazado, dependientes omitidos | R1 R2 | A | 15 nov |
-| ⬜ | 3 · Artefactos | Compila en un nodo, enlaza en otro, se descarga el binario | R3 R4 | B | 22 nov |
+| 🟡 | 3 · Artefactos | Compila en un nodo, enlaza en otro, se descarga el binario | R3 R4 | B | 22 nov |
 | ⬜ | 4 · Logs | `logs -f` en vivo; el log sobrevive al trabajador muerto | R5 | B | 24 nov |
 | ✅ | 5 · Fallos | Un guion por clase de fallo, con su reintento | R6 R8 | A | 15 nov |
 | ⬜ | 6 · Confirmación | El trabajador muere tras guardar: una sola ejecución | R7 | A | 27 nov |
@@ -36,7 +36,14 @@
 |:-:|-----|:-----:|
 | ✅ | Sistema de logs descriptivo, con la traza de un trabajo verificada en la CI ([plan/10](plan/10-sistema-de-logs.md)) | A |
 
-## Siguiente: 3 · Artefactos (B)
+## Fase en curso: 3 · Artefactos (B, Sebastian)
+
+Hecho en local, con el corte C3 en verde: almacén por contenido, subida de
+entradas, artefactos entre tareas y descarga verificada. Falta la CI en
+GitHub. Decisiones:
+[plan/11-fase-3-entradas-y-artefactos.md](plan/11-fase-3-entradas-y-artefactos.md).
+
+## Después: 4 · Logs (B) y 6 · Confirmación (A)
 
 Las fases de A que quedan dependen de ella: la 6 necesita el almacén de la 3.
 Pruebas hoy: 125 unitarias, 12 de integración, 16 de extremo a extremo y 1 de

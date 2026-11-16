@@ -41,8 +41,16 @@ No se añade alcance fuera de R1–R9 sin que el usuario lo pida.
 ## Reglas obligatorias
 
 1. **Commits sin coautor.** Nunca añadir `Co-Authored-By`, «Generated with» ni
-   ninguna atribución a IA en commits o PRs. El único autor es la identidad de
-   git local. Solo se hace commit o push cuando el usuario lo pide.
+   ninguna atribución a IA en commits o PRs. El autor de cada commit es la
+   persona que dirige ese trabajo en la sesión:
+   - persona A (Juan Carlos): la identidad de git local, sin `--author`;
+   - persona B (Sebastian), que trabaja desde esta máquina desde el
+     2026-11-15: `git commit --author="Sebastian <123786583+sebagonz106@users.noreply.github.com>"`.
+     Nunca se cambia la configuración global de git.
+
+   Si no está claro quién dirige la sesión, se pregunta antes del primer
+   commit. Nunca se reescriben ni se reasignan commits ya hechos.
+   Solo se hace commit o push cuando el usuario lo pide.
    **No se hacen PR ni ramas: todo, código y documentación, se sube con push
    directo a `main`** (D04.8, que sustituye a D04.3). Nunca abrir una solicitud
    de cambio ni proponerla. La revisión del cambio se hace antes de subirlo.
@@ -145,6 +153,8 @@ decisión aprobada requiere una decisión nueva que la sustituya.
   Fases 1 y 2.
 - [plan/09-fase-5-fallos-y-reintentos.md](plan/09-fase-5-fallos-y-reintentos.md):
   Fase 5.
+- [plan/11-fase-3-entradas-y-artefactos.md](plan/11-fase-3-entradas-y-artefactos.md):
+  Fase 3, hecha por Sebastian (persona B) desde esta máquina.
 - [plan/10-sistema-de-logs.md](plan/10-sistema-de-logs.md): logs operativos
   de todo el sistema (pedido aparte de las fases). Regla para código nuevo: los
   módulos con efectos registran con `dpes.log.event(logger, nivel, mensaje,
@@ -204,8 +214,15 @@ intentos en la vista, plazo de cola y de ejecución por intento, y fallos
 inyectables (`DPES_FAULT`, solo con `DPES_FAULT_INJECTION=1` en el
 trabajador). Siguiente: Fase 3 (artefactos, pista B); la Fase 6 la necesita.
 
+Fase 3 hecha en local por Sebastian (persona B), con el corte C3 en verde
+([plan/11](plan/11-fase-3-entradas-y-artefactos.md)): `hashing.py`, `cas.py`,
+actor `BlobStore` en el nodo de control sobre el volumen `dpes-data`,
+`inputs`/`outputs` por tarea, artefactos entre dependencias, `PUT`/`GET
+/blobs` y `artifacts` en el cliente. Se cierra cuando la CI pase en GitHub.
+
 Uso desde Windows con el clúster levantado:
-`py -m dpes.cli submit job.json`, `py -m dpes.cli wait <id>`.
+`py -m dpes.cli submit examples/hola/job.json`, `py -m dpes.cli wait <id>`,
+`py -m dpes.cli artifacts <id> link <carpeta>`.
 
 Hallazgo que condiciona la Fase 5 (D06.14): Ray no avisa de un trabajador
 pausado o incomunicado; el plazo propio del coordinador por intento es la única
@@ -216,4 +233,10 @@ control** (D04.7): especificación, grafo, coordinador, clasificación de fallos
 reintentos y confirmación. Trabaja en Windows: lo puro se prueba con
 `py -m unittest`; lo que necesita Ray se ejecuta en los contenedores. La pista
 de datos y plataforma (imagen, CI, espacio aislado, ejecutor, almacén, logs,
-caché) es del otro integrante; no tocar sus módulos sin acordarlo.
+caché) es del otro integrante, Sebastian (persona B, dueño del repo,
+`sebagonz106`); no tocar sus módulos sin acordarlo.
+
+Desde el 2026-11-15 Sebastian también trabaja desde esta máquina (se le rompió
+la suya). En una sesión suya, sus commits llevan su `--author` (regla 1). Las
+Fases 0 y 1 de su pista las hizo la persona A y así consta en el plan y en el
+historial.
