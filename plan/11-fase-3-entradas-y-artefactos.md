@@ -1,7 +1,8 @@
 # 11 — Fase 3: entradas y artefactos
 
 - **Fecha:** 2026-11-15
-- **Estado:** en curso
+- **Estado:** cerrada el 2026-11-15. El corte C3 pasó en la CI de GitHub
+  (ejecución 43791223473, commit `2994a70`). R3 y R4 quedan cumplidos.
 - **Quién:** persona B (Sebastian), pista de datos y plataforma
 - **Paso:** Fase 3 de [03-fases-y-dependencias.md](03-fases-y-dependencias.md)
 - **Requisitos:** R4 (transferencia de entradas y artefactos) y el resto de R3

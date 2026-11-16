@@ -214,11 +214,12 @@ intentos en la vista, plazo de cola y de ejecución por intento, y fallos
 inyectables (`DPES_FAULT`, solo con `DPES_FAULT_INJECTION=1` en el
 trabajador). Siguiente: Fase 3 (artefactos, pista B); la Fase 6 la necesita.
 
-Fase 3 hecha en local por Sebastian (persona B), con el corte C3 en verde
-([plan/11](plan/11-fase-3-entradas-y-artefactos.md)): `hashing.py`, `cas.py`,
-actor `BlobStore` en el nodo de control sobre el volumen `dpes-data`,
-`inputs`/`outputs` por tarea, artefactos entre dependencias, `PUT`/`GET
-/blobs` y `artifacts` en el cliente. Se cierra cuando la CI pase en GitHub.
+Fase 3 cerrada el 2026-11-15 por Sebastian (persona B), con el corte C3 en
+verde en la CI ([plan/11](plan/11-fase-3-entradas-y-artefactos.md)):
+`hashing.py`, `cas.py`, actor `BlobStore` en el nodo de control sobre el
+volumen `dpes-data`, `inputs`/`outputs` por tarea, artefactos entre
+dependencias, `PUT`/`GET /blobs` y `artifacts` en el cliente. R3 y R4
+cumplidos. Siguiente: Fases 4, 6 y 7, que ya pueden empezar.
 
 Uso desde Windows con el clúster levantado:
 `py -m dpes.cli submit examples/hola/job.json`, `py -m dpes.cli wait <id>`,
