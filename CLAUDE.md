@@ -155,6 +155,10 @@ decisión aprobada requiere una decisión nueva que la sustituya.
   Fase 5.
 - [plan/11-fase-3-entradas-y-artefactos.md](plan/11-fase-3-entradas-y-artefactos.md):
   Fase 3, hecha por Sebastian (persona B) desde esta máquina.
+- [plan/12-fase-6-confirmacion-perdida.md](plan/12-fase-6-confirmacion-perdida.md):
+  Fase 6 (persona A). Resultados confirmados en `dpes/store.py` (SQLite, el
+  primero que escribe gana), guardados por el ejecutor antes de contestar y
+  reconciliados por el coordinador antes de reintentar; envío idempotente.
 - [plan/10-sistema-de-logs.md](plan/10-sistema-de-logs.md): logs operativos
   de todo el sistema (pedido aparte de las fases). Regla para código nuevo: los
   módulos con efectos registran con `dpes.log.event(logger, nivel, mensaje,
@@ -219,7 +223,12 @@ verde en la CI ([plan/11](plan/11-fase-3-entradas-y-artefactos.md)):
 `hashing.py`, `cas.py`, actor `BlobStore` en el nodo de control sobre el
 volumen `dpes-data`, `inputs`/`outputs` por tarea, artefactos entre
 dependencias, `PUT`/`GET /blobs` y `artifacts` en el cliente. R3 y R4
-cumplidos. Siguiente: Fases 4, 6 y 7, que ya pueden empezar.
+cumplidos.
+
+Fase 6 hecha en local por la persona A ([plan/12](plan/12-fase-6-confirmacion-perdida.md)):
+`store.py`, punto de confirmación en el ejecutor, reconciliación en el
+coordinador, fallo inyectable `lose-ack` y `Idempotency-Key`. Se cierra cuando
+la CI pase en GitHub. Pendientes de B: Fases 4 y 7.
 
 Uso desde Windows con el clúster levantado:
 `py -m dpes.cli submit examples/hola/job.json`, `py -m dpes.cli wait <id>`,
