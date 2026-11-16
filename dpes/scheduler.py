@@ -121,6 +121,8 @@ class Job:
                     "exit_code": task.result and task.result.exit_code,
                     "timed_out": bool(task.result and task.result.timed_out),
                     "output": task.result.output_tail if task.result else "",
+                    "outputs": dict(task.result.outputs) if task.result
+                    else {},
                     "failure_class": (
                         task.failure_class.value if task.failure_class
                         else None
@@ -194,6 +196,9 @@ class Job:
             f"{self.job_id}/{name}/{task.round}/{task.attempts}"
         )
         self._running[task.execution_id] = name
+        inputs = dict(task.spec.inputs)
+        for need in task.spec.needs:  # artifacts flow along needs (D11.3)
+            inputs.update(self._tasks[need].result.outputs)
         return Attempt(
             job_id=self.job_id,
             task=name,
@@ -201,8 +206,8 @@ class Job:
             execution_id=task.execution_id,
             command=task.spec.command,
             env=task.spec.env,
-            inputs={},
-            outputs=(),
+            inputs=inputs,
+            outputs=task.spec.outputs,
             timeout_s=task.spec.timeout_s,
         )
 

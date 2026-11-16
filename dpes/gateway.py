@@ -10,12 +10,15 @@ import logging
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from dpes.hashing import digest
 from dpes.log import event, setup
 from dpes.spec import SpecError, parse_job
 
 MAX_BODY = 1 << 20  # checked before reading, so a client cannot exhaust memory
+MAX_BLOB = 16 << 20  # blobs travel whole in memory (plan/11, D11.5)
 PORT = 8000
 _JOB_PATH = re.compile(r"/jobs/([^/]+)")
+_BLOB_PATH = re.compile(r"/blobs/(sha256:[0-9a-f]{64})")
 # Not __name__: run with `python -m`, this module is "__main__", outside the
 # "dpes" logger tree that setup() configures, and every line would be lost.
 _log = logging.getLogger("dpes.gateway")
@@ -54,7 +57,30 @@ class _Handler(BaseHTTPRequestHandler):
               tasks=len(spec.tasks))
         self._send(201, {"job_id": job_id})
 
+    def do_PUT(self):
+        match = _BLOB_PATH.fullmatch(self.path)
+        if not match:
+            return self._send(404, {"error": "not found"})
+        length = self.headers.get("Content-Length", "")
+        if not length.isdigit():
+            return self._refuse(411, "Content-Length required")
+        if int(length) > MAX_BLOB:
+            return self._refuse(413, f"blob over {MAX_BLOB} bytes")
+        data = self.rfile.read(int(length))
+        if digest(data) != match[1]:  # checked on every hop (D11.4)
+            return self._refuse(400, "content does not match its digest")
+        try:
+            self.server.coordinator.put_blob(match[1], data)
+        except Exception as error:  # whatever broke, the gateway stays up
+            return self._unavailable(error)
+        event(_log, logging.INFO, "blob stored", digest=match[1],
+              bytes=len(data))
+        self._send(201, {"digest": match[1]})
+
     def do_GET(self):
+        blob = _BLOB_PATH.fullmatch(self.path)
+        if blob:
+            return self._serve_blob(blob[1])
         match = _JOB_PATH.fullmatch(self.path)
         if not match:
             return self._send(404, {"error": "not found"})
@@ -68,6 +94,19 @@ class _Handler(BaseHTTPRequestHandler):
         if view is None:
             return self._send(404, {"error": "unknown job"})
         self._send(200, view)
+
+    def _serve_blob(self, name):
+        try:
+            data = self.server.coordinator.get_blob(name)
+        except Exception as error:  # whatever broke, the gateway stays up
+            return self._unavailable(error)
+        if data is None:
+            return self._send(404, {"error": "unknown blob"})
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def _reject(self, errors):
         event(_log, logging.WARNING, "job rejected", errors=len(errors),

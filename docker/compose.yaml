@@ -31,6 +31,9 @@ services:
     # are full of numbers (plan/10, D10.7).
     environment:
       RAY_DEDUP_LOGS: "0"
+    # The blob store lives here and survives the container (plan/11, D11.5).
+    volumes:
+      - dpes-data:/var/lib/dpes
     shm_size: 1gb
     networks: [cluster]
     # The gateway is the only published port, and only on this machine
@@ -82,3 +85,6 @@ services:
 
 networks:
   cluster: {}
+
+volumes:
+  dpes-data: {}

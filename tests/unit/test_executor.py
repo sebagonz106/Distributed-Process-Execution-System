@@ -8,9 +8,25 @@ from unittest import mock
 if sys.platform != "linux":
     raise unittest.SkipTest("the executor needs Linux process groups")
 
-from dpes.executor import execute  # imported after the skip: it needs Linux
+from dpes import executor  # imported after the skip: it needs Linux
+from dpes.hashing import digest
 from dpes.log import Formatter
 from dpes.messages import Attempt, Evidence, ExecutorFailure, TaskResult
+
+
+class Blobs(dict):
+    """In-memory store with the executor's interface (plan/11, D11.5)."""
+
+    def get(self, name):
+        return super().get(name)
+
+    def put(self, data):
+        self[digest(data)] = data
+        return digest(data)
+
+
+def execute(attempt, store=None):
+    return executor.execute(attempt, Blobs() if store is None else store)
 
 
 def attempt(script, **changes):
@@ -57,6 +73,78 @@ class ExecuteTest(unittest.TestCase):
 
         self.assertIsInstance(outcome, ExecutorFailure)
         self.assertEqual(Evidence.WORKSPACE_FAILED, outcome.evidence)
+
+
+class Broken:
+    def get(self, name):
+        raise ConnectionError("store unreachable")
+
+    def put(self, data):
+        raise ConnectionError("store unreachable")
+
+
+class InputsOutputsTest(unittest.TestCase):
+    def test_inputs_are_placed_at_their_paths_before_the_command(self):
+        store = Blobs()
+        name = store.put(b"hola\n")
+
+        result = execute(attempt("cat src/a.txt", inputs={"src/a.txt": name}),
+                         store)
+
+        self.assertEqual("hola\n", result.output_tail)
+
+    def test_an_input_whose_content_does_not_match_is_refused(self):
+        store = Blobs({digest(b"expected"): b"tampered"})
+
+        failure = execute(attempt("true",
+                                  inputs={"a": digest(b"expected")}), store)
+
+        self.assertEqual(Evidence.DIGEST_MISMATCH, failure.evidence)
+
+    def test_an_input_that_cannot_be_fetched_is_unavailable(self):
+        absent = attempt("true", inputs={"a": digest(b"x")})
+        for store in (Blobs(), Broken()):
+            with self.subTest(store=type(store).__name__):
+                failure = execute(absent, store)
+                self.assertEqual(Evidence.INPUT_UNAVAILABLE, failure.evidence)
+
+    def test_declared_outputs_are_stored_and_listed_by_digest(self):
+        store = Blobs()
+
+        result = execute(attempt("echo hi > out.txt; echo no > extra.txt",
+                                 outputs=("out.txt",)), store)
+
+        self.assertEqual({"out.txt": digest(b"hi\n")}, result.outputs)
+        self.assertEqual(b"hi\n", store[digest(b"hi\n")])
+        self.assertNotIn(digest(b"no\n"), store)
+
+    def test_a_declared_output_that_is_missing_fails_the_task(self):
+        result = execute(attempt("true", outputs=("out.txt",)))
+
+        self.assertEqual(("out.txt",), result.missing_outputs)
+        self.assertFalse(result.succeeded)
+
+    def test_an_output_is_never_read_through_a_link(self):
+        for script, path in (("ln -s /etc/hostname out", "out"),
+                             ("ln -s /etc d", "d/hostname")):
+            with self.subTest(path=path):
+                result = execute(attempt(script, outputs=(path,)))
+                self.assertEqual((path,), result.missing_outputs)
+
+    def test_an_output_that_cannot_be_uploaded_is_a_failed_transfer(self):
+        failure = execute(attempt("echo hi > out", outputs=("out",)),
+                          Broken())
+
+        self.assertEqual(Evidence.OUTPUT_UPLOAD_FAILED, failure.evidence)
+
+    def test_the_command_can_write_inside_a_folder_that_came_as_input(self):
+        store = Blobs()
+        name = store.put(b"int main(){}\n")
+
+        result = execute(attempt("touch build/new && echo ok",
+                                 inputs={"build/a.c": name}), store)
+
+        self.assertEqual((0, "ok\n"), (result.exit_code, result.output_tail))
 
 
 class ExecutorLogTest(unittest.TestCase):

@@ -1,8 +1,9 @@
-"""Command line client of the gateway (plan/07, D07.10).
+"""Command line client of the gateway (plan/07, D07.10; plan/11).
 
     python -m dpes.cli submit job.json
     python -m dpes.cli status <job id>
     python -m dpes.cli wait <job id>
+    python -m dpes.cli artifacts <job id> <task> <folder>
 """
 
 import argparse
@@ -13,6 +14,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+from dpes.hashing import digest
+from dpes.spec import is_workspace_path
 
 EXIT_BY_STATE = {"SUCCEEDED": 0, "FAILED": 1, "ERROR": 2}
 EXIT_REQUEST_FAILED = 3  # rejected, unknown job or gateway unreachable
@@ -33,18 +37,24 @@ def main(argv=None) -> int:
     wait = commands.add_parser("wait")
     wait.add_argument("job_id")
     wait.add_argument("--interval", type=float, default=1.0)
+    artifacts = commands.add_parser("artifacts")
+    artifacts.add_argument("job_id")
+    artifacts.add_argument("task")
+    artifacts.add_argument("folder")
     args = parser.parse_args(argv)
     base = args.url.rstrip("/")
 
     try:
         if args.command == "submit":
-            with open(args.job_file, "rb") as handle:
-                print(_call(f"{base}/jobs", handle.read())["job_id"])
+            print(_submit(base, args.job_file))
             return 0
         job_url = f"{base}/jobs/{urllib.parse.quote(args.job_id, safe='')}"
         view = _call(job_url)
         if args.command == "status":
             print(json.dumps(view, indent=2))
+            return 0
+        if args.command == "artifacts":
+            _download(base, view, args.task, args.folder)
             return 0
         while view["state"] not in EXIT_BY_STATE:
             time.sleep(args.interval)
@@ -56,11 +66,53 @@ def main(argv=None) -> int:
         return EXIT_REQUEST_FAILED
 
 
+def _submit(base, job_file):
+    """Upload each task's listed inputs, then send the job with digests."""
+    with open(job_file, "rb") as handle:
+        document = json.loads(handle.read())
+    folder = os.path.dirname(os.path.abspath(job_file))
+    for task in (document.get("tasks") or {}).values():
+        if isinstance(task, dict) and isinstance(task.get("inputs"), list):
+            task["inputs"] = {
+                path: _upload(base, os.path.join(folder, path))
+                for path in task["inputs"]
+            }
+    body = json.dumps(document).encode()
+    return _call(f"{base}/jobs", body)["job_id"]
+
+
+def _upload(base, path):
+    with open(path, "rb") as handle:
+        data = handle.read()
+    name = digest(data)
+    _request(f"{base}/blobs/{name}", data, method="PUT")
+    return name
+
+
+def _download(base, view, task, folder):
+    """Fetch every output of `task`, each checked against its digest."""
+    outputs = view["tasks"][task]["outputs"]
+    for path, name in outputs.items():
+        if not is_workspace_path(path):  # never write outside `folder`
+            raise RequestFailed(f"refusing artifact path {path!r}")
+        data = _request(f"{base}/blobs/{name}")
+        if digest(data) != name:
+            raise RequestFailed(f"{path}: content does not match {name}")
+        target = os.path.join(folder, path)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "wb") as handle:
+            handle.write(data)
+
+
 def _call(url, body=None):
-    request = urllib.request.Request(url, body)
+    return json.loads(_request(url, body))
+
+
+def _request(url, body=None, method=None):
+    request = urllib.request.Request(url, body, method=method)
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
-            return json.load(response)
+            return response.read()
     except urllib.error.HTTPError as error:
         with error:
             detail = _detail(error)

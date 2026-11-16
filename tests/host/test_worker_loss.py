@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+import uuid
 
 from dpes import cli
 
@@ -33,10 +34,18 @@ def docker(*args):
     return subprocess.run(["docker", *args], capture_output=True, text=True)
 
 
+MARKER = f"marker-{uuid.uuid4().hex}"
+
+
 def running_the_task():
-    """The worker holding a task workspace, or None."""
+    """The worker whose workspace holds this run's marker, or None.
+
+    Not just any workspace: attempts killed by earlier tests leave theirs
+    behind (plan/11, D11.11).
+    """
     for worker in WORKERS:
-        found = docker("exec", worker, "sh", "-c", "ls -d /tmp/dpes-*")
+        found = docker("exec", worker, "sh", "-c",
+                       f"ls /tmp/dpes-*/{MARKER}")
         if found.returncode == 0:
             return worker
     return None
@@ -70,7 +79,8 @@ class WorkerLossTest(unittest.TestCase):
 
     def test_a_killed_worker_is_a_worker_failure_retried_elsewhere(self):
         job_id = self.submit({
-            "slow": {"command": ["sh", "-c", "sleep 8; hostname"]},
+            "slow": {"command": ["sh", "-c",
+                                 f"touch {MARKER}; sleep 8; hostname"]},
         })
         victim = self.wait_until(running_the_task, 30, "running task")
 

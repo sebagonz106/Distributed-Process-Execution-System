@@ -11,11 +11,14 @@ import unittest
 
 import ray
 
-from dpes.coordinator import Coordinator, _Client
+import tempfile
+
+from dpes.coordinator import BlobStore, Coordinator, _Client
+from dpes.hashing import digest
 from dpes.spec import SpecError, parse_job
 
 
-def stand_in_executor(attempt):
+def stand_in_executor(attempt, store):
     """Obeys the command's name instead of running it. Defined at module
     level but shipped by value: tests/ is not on the workers' path."""
     import os
@@ -51,8 +54,9 @@ class CoordinatorTestCase(unittest.TestCase):
         # Quiet: these check states; tests/host checks the logs.
         ray.init(address="auto", logging_level="ERROR",
                  ignore_reinit_error=True, log_to_driver=False)
+        cls.store = BlobStore.remote(tempfile.mkdtemp(prefix="dpes-store-"))
         cls.coordinator = Coordinator.remote(
-            stand_in_executor, queue_timeout_s=cls.queue_timeout_s
+            stand_in_executor, cls.store, queue_timeout_s=cls.queue_timeout_s
         )
 
     @classmethod
@@ -150,9 +154,25 @@ class CoordinatorTest(CoordinatorTestCase):
         spec = job(t={"command": ["0"], "resources": {"gpu": 1}})
 
         with self.assertRaises(SpecError) as caught:
-            _Client(self.coordinator).submit(spec)
+            _Client(self.coordinator, self.store).submit(spec)
 
         self.assertIn("gpu", caught.exception.errors[0])
+
+    def test_a_blob_goes_into_the_store_and_comes_back(self):
+        client = _Client(self.coordinator, self.store)
+
+        client.put_blob(digest(b"hola"), b"hola")
+
+        self.assertEqual(b"hola", client.get_blob(digest(b"hola")))
+        self.assertIsNone(client.get_blob(digest(b"never")))
+
+    def test_a_job_whose_inputs_were_never_uploaded_is_refused(self):
+        spec = job(t={"command": ["0"], "inputs": {"a.c": digest(b"no")}})
+
+        with self.assertRaises(SpecError) as caught:
+            _Client(self.coordinator, self.store).submit(spec)
+
+        self.assertIn("never uploaded", caught.exception.errors[0])
 
 
 class RetryTest(CoordinatorTestCase):

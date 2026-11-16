@@ -14,7 +14,9 @@ import uuid
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
+from dpes.cas import BlobDir
 from dpes.failures import DEADLINE, classify
+from dpes.hashing import digest
 from dpes.log import event, setup
 from dpes.messages import ExecutorFailure, TaskResult
 from dpes.scheduler import Job, State
@@ -23,6 +25,9 @@ from dpes.spec import SpecError, demand, unschedulable
 NAMESPACE = "dpes"
 NAME = "coordinator"
 CALL_TIMEOUT_S = 10
+STORE_NAME = "store"
+STORE_ROOT = "/var/lib/dpes/blobs"  # a Docker volume on the control node
+STORE_TIMEOUT_S = 60  # a 16 MiB blob crosses the network
 QUEUE_TIMEOUT_S = 3600.0  # launch to start signal (D09.4)
 RUN_MARGIN_S = 5.0  # past the task's own time limit, silence is a failure
 _FINISHED = {State.SUCCEEDED, State.FAILED, State.ERROR}
@@ -30,11 +35,43 @@ _log = logging.getLogger(__name__)
 
 
 @ray.remote(num_cpus=0)  # the real resources are set per launch
-def _attempt(execute, attempt, coordinator):
+def _attempt(execute, attempt, coordinator, store):
     """One attempt as a Ray task: say it started, then run it."""
     setup()  # this worker process logs like every other (D10.7)
     coordinator.started.remote(attempt.execution_id)
-    return execute(attempt)
+    return execute(attempt, _StoreClient(store))
+
+
+@ray.remote(num_cpus=0, max_restarts=0)
+class BlobStore:
+    """The content-addressed store on the control node (plan/11, D11.5)."""
+
+    def __init__(self, root):
+        setup()
+        self._blobs = BlobDir(root)
+
+    def put(self, name, data):
+        return self._blobs.put(name, data)
+
+    def get(self, name):
+        return self._blobs.get(name)
+
+    def missing(self, names):
+        return self._blobs.missing(names)
+
+
+class _StoreClient:
+    """What the executor gets: the store's get and put, as plain calls."""
+
+    def __init__(self, actor):
+        self._actor = actor
+
+    def get(self, name):
+        return ray.get(self._actor.get.remote(name), timeout=STORE_TIMEOUT_S)
+
+    def put(self, data):
+        reply = self._actor.put.remote(digest(data), data)
+        return ray.get(reply, timeout=STORE_TIMEOUT_S)
 
 
 @ray.remote(num_cpus=0, max_restarts=0)
@@ -44,9 +81,10 @@ class Coordinator:
     `execute` takes an Attempt and returns a TaskResult or an ExecutorFailure.
     """
 
-    def __init__(self, execute, queue_timeout_s=QUEUE_TIMEOUT_S):
+    def __init__(self, execute, store, queue_timeout_s=QUEUE_TIMEOUT_S):
         setup()
         self._execute = execute
+        self._store = store
         self._queue_timeout_s = queue_timeout_s
         self._me = ray.get_runtime_context().current_actor
         self._jobs = {}
@@ -132,7 +170,7 @@ class Coordinator:
         started = self._started[eid] = asyncio.Event()
         task = job.spec.tasks[attempt.task]
         ref = _attempt.options(max_retries=0, **_placement(task)).remote(
-            self._execute, attempt, self._me
+            self._execute, attempt, self._me, self._store
         )
         event(_log, logging.INFO, "attempt launched", execution=eid,
               resources=_compact(task.resources))
@@ -206,13 +244,22 @@ def _placement(task):
 class _Client:
     """What the gateway calls: blocking calls with a deadline."""
 
-    def __init__(self, actor):
+    def __init__(self, actor, store):
         self._actor = actor
+        self._store = store
 
     def submit(self, spec):
         # Refused here, not queued forever in Ray (plan/08, D08.3).
         live = [node["Resources"] for node in ray.nodes() if node["Alive"]]
         errors = unschedulable(spec, live)
+        wanted = [(name, path, blob) for name, task in spec.tasks.items()
+                  for path, blob in task.inputs.items()]
+        absent = set(ray.get(
+            self._store.missing.remote([blob for _, _, blob in wanted]),
+            timeout=CALL_TIMEOUT_S,
+        ))
+        errors += [f"tasks.{name}.inputs.{path}: {blob} was never uploaded"
+                   for name, path, blob in wanted if blob in absent]
         if errors:
             raise SpecError(errors)
         return ray.get(self._actor.submit.remote(spec), timeout=CALL_TIMEOUT_S)
@@ -220,6 +267,13 @@ class _Client:
     def status(self, job_id):
         reply = self._actor.status.remote(job_id)
         return ray.get(reply, timeout=CALL_TIMEOUT_S)
+
+    def put_blob(self, name, data):
+        reply = self._store.put.remote(name, data)
+        return ray.get(reply, timeout=STORE_TIMEOUT_S)
+
+    def get_blob(self, name):
+        return ray.get(self._store.get.remote(name), timeout=STORE_TIMEOUT_S)
 
 
 def connect() -> _Client:
@@ -230,10 +284,16 @@ def connect() -> _Client:
     here = NodeAffinitySchedulingStrategy(
         ray.get_runtime_context().get_node_id(), soft=False
     )
+    store = BlobStore.options(
+        name=STORE_NAME,
+        lifetime="detached",
+        get_if_exists=True,
+        scheduling_strategy=here,  # its folder is this node's volume (D11.5)
+    ).remote(STORE_ROOT)
     actor = Coordinator.options(
         name=NAME,
         lifetime="detached",  # survives a gateway restart
         get_if_exists=True,
         scheduling_strategy=here,
-    ).remote(execute)
-    return _Client(actor)
+    ).remote(execute, store)
+    return _Client(actor, store)

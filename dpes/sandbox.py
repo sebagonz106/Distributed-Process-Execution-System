@@ -27,7 +27,11 @@ def run(command, env, timeout_s, workspace) -> Outcome:
         # One Ray worker process runs one attempt at a time and live pids are
         # unique, so concurrent attempts always get different users.
         uid = _FIRST_UID + os.getpid()
-        os.chown(workspace, uid, uid)
+        # Everything in it, inputs included (plan/11, D11.7).
+        for folder, subfolders, files in os.walk(workspace):
+            os.chown(folder, uid, uid)
+            for name in files:
+                os.lchown(os.path.join(folder, name), uid, uid)
         identity = {"user": uid, "group": uid, "extra_groups": []}
 
     # A file, not a pipe: a background child would keep a pipe open and

@@ -10,7 +10,8 @@ import urllib.error
 import urllib.request
 
 from dpes import cli
-from dpes.gateway import MAX_BODY, make_server
+from dpes.gateway import MAX_BLOB, MAX_BODY, make_server
+from dpes.hashing import digest
 from dpes.spec import JobSpec, SpecError
 
 HELLO_JOB = {"tasks": {"hello": {"command": ["echo", "hi"]}}}
@@ -24,14 +25,26 @@ class FakeCoordinator:
         self.views = {}  # job id -> snapshots returned in order, last repeats
         self.broken = False
         self.unschedulable = []  # errors the cluster check would report
+        self.blobs = {}
 
     def submit(self, spec):
         if self.broken:
             raise ConnectionError("coordinator unreachable")
         if self.unschedulable:
             raise SpecError(self.unschedulable)
+        absent = [f"{name}: {d} never uploaded"
+                  for name, task in spec.tasks.items()
+                  for d in task.inputs.values() if d not in self.blobs]
+        if absent:
+            raise SpecError(absent)
         self.submitted.append(spec)
         return "job-1"
+
+    def put_blob(self, name, data):
+        self.blobs[name] = data
+
+    def get_blob(self, name):
+        return self.blobs.get(name)
 
     def status(self, job_id):
         if self.broken:
@@ -132,6 +145,50 @@ class GatewayTest(ServerTestCase):
         self.assertEqual(503, self.request("GET", "/jobs/job-1")[0])
 
 
+class BlobTest(ServerTestCase):
+    def raw(self, method, path, body=None):
+        request = urllib.request.Request(self.url + path, body, method=method)
+        try:
+            with urllib.request.urlopen(request) as response:
+                return response.status, response.read()
+        except urllib.error.HTTPError as error:
+            with error:
+                return error.code, error.read()
+
+    def test_a_blob_put_under_its_digest_is_got_back(self):
+        name = digest(b"hola")
+
+        self.assertEqual(201, self.raw("PUT", f"/blobs/{name}", b"hola")[0])
+        self.assertEqual((200, b"hola"), self.raw("GET", f"/blobs/{name}"))
+
+    def test_content_that_does_not_match_its_digest_is_refused(self):
+        status, _ = self.raw("PUT", f"/blobs/{digest(b'x')}", b"hola")
+
+        self.assertEqual(400, status)
+        self.assertEqual({}, self.coordinator.blobs)
+
+    def test_a_blob_over_the_limit_is_refused_unread(self):
+        connection = http.client.HTTPConnection(*self.server.server_address)
+        self.addCleanup(connection.close)
+        connection.putrequest("PUT", f"/blobs/{digest(b'big')}")
+        connection.putheader("Content-Length", str(MAX_BLOB + 1))
+        connection.endheaders()
+
+        self.assertEqual(413, connection.getresponse().status)
+
+    def test_an_unknown_or_malformed_blob_is_not_found(self):
+        self.assertEqual(404, self.raw("GET", f"/blobs/{digest(b'no')}")[0])
+        self.assertEqual(404, self.raw("GET", "/blobs/../etc/passwd")[0])
+
+    def test_a_job_whose_inputs_were_never_uploaded_is_rejected(self):
+        job = {"tasks": {"t": {"command": ["true"],
+                               "inputs": {"a.c": digest(b"never")}}}}
+
+        status, _ = self.request("POST", "/jobs", json.dumps(job).encode())
+
+        self.assertEqual(400, status)
+
+
 class GatewayLogTest(ServerTestCase):
     def logged(self, level, *request):
         with self.assertLogs("dpes.gateway", level) as caught:
@@ -217,6 +274,71 @@ class CliTest(ServerTestCase):
 
         self.assertEqual(cli.EXIT_REQUEST_FAILED, code)
         self.assertIn("404", err)
+
+    def test_submit_uploads_the_listed_inputs_and_sends_their_digests(self):
+        path = self.write_job({"tasks": {"t": {"command": ["cat", "a.txt"],
+                                                 "inputs": ["a.txt"]}}})
+        with open(os.path.join(os.path.dirname(path), "a.txt"), "wb") as f:
+            f.write(b"hola")
+
+        code, _, _ = self.run_cli("submit", path)
+
+        self.assertEqual(0, code)
+        self.assertEqual({digest(b"hola"): b"hola"}, self.coordinator.blobs)
+        self.assertEqual({"a.txt": digest(b"hola")},
+                         self.coordinator.submitted[0].tasks["t"].inputs)
+
+    def test_a_listed_input_that_does_not_exist_is_a_failed_request(self):
+        path = self.write_job({"tasks": {"t": {"command": ["true"],
+                                                 "inputs": ["absent.c"]}}})
+
+        code, _, err = self.run_cli("submit", path)
+
+        self.assertEqual(cli.EXIT_REQUEST_FAILED, code)
+        self.assertIn("absent.c", err)
+
+    def finished(self, outputs):
+        state = {"state": "SUCCEEDED", "outputs": outputs}
+        return {"job_id": "job-1", "state": "SUCCEEDED",
+                "tasks": {"t": state}}
+
+    def test_artifacts_are_downloaded_to_their_paths_and_checked(self):
+        self.coordinator.blobs[digest(b"bin")] = b"bin"
+        self.coordinator.views["job-1"] = [
+            self.finished({"out/app": digest(b"bin")})
+        ]
+        target = tempfile.TemporaryDirectory()
+        self.addCleanup(target.cleanup)
+
+        code, _, _ = self.run_cli("artifacts", "job-1", "t", target.name)
+
+        with open(os.path.join(target.name, "out", "app"), "rb") as handle:
+            self.assertEqual((0, b"bin"), (code, handle.read()))
+
+    def test_an_artifact_whose_content_does_not_match_is_refused(self):
+        self.coordinator.blobs[digest(b"bin")] = b"tampered"
+        self.coordinator.views["job-1"] = [
+            self.finished({"app": digest(b"bin")})
+        ]
+        target = tempfile.TemporaryDirectory()
+        self.addCleanup(target.cleanup)
+
+        code, _, err = self.run_cli("artifacts", "job-1", "t", target.name)
+
+        self.assertEqual(cli.EXIT_REQUEST_FAILED, code)
+        self.assertEqual([], os.listdir(target.name))
+
+    def test_an_artifact_path_leaving_the_folder_is_refused(self):
+        self.coordinator.blobs[digest(b"x")] = b"x"
+        self.coordinator.views["job-1"] = [
+            self.finished({"../escape": digest(b"x")})
+        ]
+        target = tempfile.TemporaryDirectory()
+        self.addCleanup(target.cleanup)
+
+        code, _, _ = self.run_cli("artifacts", "job-1", "t", target.name)
+
+        self.assertEqual(cli.EXIT_REQUEST_FAILED, code)
 
     def test_an_unreachable_gateway_is_a_failed_request(self):
         self.url = "http://127.0.0.1:9"  # nothing listens there

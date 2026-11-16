@@ -1,5 +1,6 @@
 import unittest
 
+from dpes.hashing import digest
 from dpes.spec import (
     DEFAULT_TIMEOUT_S,
     SpecError,
@@ -84,7 +85,7 @@ class RejectedJobTest(SpecTestCase):
         self.assertRejected({**job(), "extra": 1}, "extra")
 
     def test_fields_of_later_phases_are_rejected_until_they_exist(self):
-        self.assertRejected(job(inputs={"a.c": "x"}), "tasks.hello.inputs")
+        self.assertRejected(job(cache=False), "tasks.hello.cache")
 
     def test_every_error_is_reported_at_once(self):
         errors = self.assertRejected(
@@ -161,6 +162,51 @@ class ResourcesTest(SpecTestCase):
             with self.subTest(name=name):
                 document = job(resources={name: 1})
                 self.assertRejected(document, f"tasks.hello.resources.{name}")
+
+
+D = digest(b"content")
+BAD_PATHS = ("/etc/x", "../x", "a/../b", "./a", "a//b", "a\\b", "", "a/",
+             ".", "x" * 256)
+
+
+class InputsOutputsTest(SpecTestCase):
+    def test_inputs_and_outputs_are_kept(self):
+        task = parse_job(job(inputs={"src/main.c": D},
+                             outputs=["main.o"])).tasks["hello"]
+
+        self.assertEqual({"src/main.c": D}, task.inputs)
+        self.assertEqual(("main.o",), task.outputs)
+
+    def test_a_path_must_stay_inside_the_workspace_in_canonical_form(self):
+        for path in BAD_PATHS:
+            with self.subTest(path=path):
+                self.assertRejected(job(inputs={path: D}),
+                                    "tasks.hello.inputs")
+                self.assertRejected(job(outputs=[path]),
+                                    "tasks.hello.outputs")
+
+    def test_an_input_must_name_a_digest(self):
+        self.assertRejected(job(inputs={"a.c": "not-a-digest"}),
+                            "tasks.hello.inputs")
+        self.assertRejected(job(inputs=["a.c"]), "tasks.hello.inputs")
+
+    def test_an_output_cannot_be_declared_twice(self):
+        self.assertRejected(job(outputs=["a.o", "a.o"]),
+                            "tasks.hello.outputs")
+
+    def test_a_path_cannot_arrive_from_two_sources(self):
+        made = {"command": ["true"], "outputs": ["x"]}
+        self.assertRejected(
+            {"tasks": {"a": made,
+                       "b": {"command": ["true"], "needs": ["a"],
+                             "inputs": {"x": D}}}},
+            "tasks.b", "'x'",
+        )
+        self.assertRejected(
+            {"tasks": {"a": made, "c": made,
+                       "b": {"command": ["true"], "needs": ["a", "c"]}}},
+            "tasks.b", "'x'",
+        )
 
 
 class RetriesTest(SpecTestCase):

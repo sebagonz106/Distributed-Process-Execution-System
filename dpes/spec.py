@@ -9,8 +9,11 @@ import re
 from dataclasses import dataclass, field
 from typing import Mapping
 
+from pathlib import PurePosixPath
+
 from dpes.dag import find_cycle
 from dpes.failures import DEFAULT_RETRIES
+from dpes.hashing import is_digest
 
 DEFAULT_TIMEOUT_S = 600.0
 MAX_TIMEOUT_S = 86_400.0
@@ -20,7 +23,11 @@ _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _CAPABILITY = re.compile(r"[a-z][a-z0-9_-]{0,63}")
 _RAY_OWNED = {"memory", "object_store_memory"}  # Ray's own lower-case names
 _JOB_FIELDS = {"tasks"}
-_TASK_FIELDS = {"command", "env", "timeout_s", "needs", "resources", "retries"}
+_TASK_FIELDS = {
+    "command", "env", "timeout_s", "needs", "resources", "retries",
+    "inputs", "outputs",
+}
+MAX_PATH = 255
 MAX_RETRIES = 10
 
 
@@ -44,6 +51,8 @@ class TaskSpec:
     retries: Mapping[str, int] = field(
         default_factory=lambda: dict(DEFAULT_RETRIES)
     )
+    inputs: Mapping[str, str] = field(default_factory=dict)  # path -> digest
+    outputs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -74,6 +83,8 @@ def parse_job(document) -> JobSpec:
     for name, task in tasks.items():
         for unknown in sorted(set(task.needs) - raw_tasks.keys()):
             errors.append(f"tasks.{name}.needs: unknown task {unknown!r}")
+    for name, task in tasks.items():
+        errors.extend(_clashes(name, task, tasks))
     cycle = find_cycle({name: task.needs for name, task in tasks.items()})
     if cycle:
         errors.append(f"tasks: dependency cycle {' -> '.join(cycle)}")
@@ -172,11 +183,28 @@ def _parse_task(path, raw, errors):
             "task, worker and network"
         )
 
+    inputs = raw.get("inputs", {})
+    if not (
+        isinstance(inputs, dict)
+        and all(is_workspace_path(p) and is_digest(d)
+                for p, d in inputs.items())
+    ):
+        errors.append(
+            f"{path}.inputs: must map relative paths to sha256 digests"
+        )
+
+    outputs = raw.get("outputs", [])
+    paths = isinstance(outputs, list) and all(map(is_workspace_path, outputs))
+    if not paths:
+        errors.append(f"{path}.outputs: must be a list of relative paths")
+    elif len(set(outputs)) != len(outputs):
+        errors.append(f"{path}.outputs: a path is listed twice")
+
     if len(errors) > found:
         return None
     return TaskSpec(
         tuple(command), dict(env), float(timeout), tuple(needs), resources,
-        {**DEFAULT_RETRIES, **retries},
+        {**DEFAULT_RETRIES, **retries}, dict(inputs), tuple(outputs),
     )
 
 
@@ -205,6 +233,34 @@ def _parse_resources(path, raw, errors):
         else:
             errors.append(f"{path}.{key}: {rule}")
     return resources
+
+
+def is_workspace_path(value):
+    """Relative, canonical and inside the workspace (plan/11, D11.2)."""
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= MAX_PATH
+        and "\\" not in value
+        and PurePosixPath(value).as_posix() == value
+        and not PurePosixPath(value).is_absolute()
+        and ".." not in PurePosixPath(value).parts
+        and value != "."
+    )
+
+
+def _clashes(name, task, tasks):
+    """Paths that would reach `name`'s workspace from two sources (D11.3)."""
+    source = {path: "its own inputs" for path in task.inputs}
+    errors = []
+    for need in task.needs:
+        for path in tasks[need].outputs if need in tasks else ():
+            if path in source:
+                errors.append(
+                    f"tasks.{name}: {path!r} comes from both "
+                    f"{source[path]} and {need!r}"
+                )
+            source.setdefault(path, repr(need))
+    return errors
 
 
 def _is_amount(value):

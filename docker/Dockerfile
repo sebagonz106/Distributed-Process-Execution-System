@@ -19,3 +19,4 @@ WORKDIR /app
 COPY dpes dpes
 COPY tests tests
 COPY experiments experiments
+COPY examples examples

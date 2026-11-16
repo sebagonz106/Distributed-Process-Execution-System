@@ -1,0 +1,23 @@
+{
+  "tasks": {
+    "compile-main": {
+      "command": ["gcc", "-c", "main.c", "-o", "main.o"],
+      "inputs": ["main.c", "greet.h"],
+      "outputs": ["main.o"]
+    },
+    "compile-greet": {
+      "command": ["gcc", "-c", "greet.c", "-o", "greet.o"],
+      "inputs": ["greet.c", "greet.h"],
+      "outputs": ["greet.o"]
+    },
+    "link": {
+      "command": ["gcc", "main.o", "greet.o", "-o", "hola"],
+      "needs": ["compile-main", "compile-greet"],
+      "outputs": ["hola"]
+    },
+    "test": {
+      "command": ["sh", "-c", "chmod +x hola && ./hola | grep -x 'hola, mundo'"],
+      "needs": ["link"]
+    }
+  }
+}

@@ -329,5 +329,28 @@ class RetryTest(unittest.TestCase):
         self.assertEqual(["b"], names(unblocked))
 
 
+class ArtifactFlowTest(unittest.TestCase):
+    def test_a_task_receives_its_inputs_and_its_dependencies_outputs(self):
+        tasks = {
+            "compile": TaskSpec(("cc",), {}, 30.0, inputs={"a.c": "sha256:c"},
+                                outputs=("a.o",)),
+            "link": TaskSpec(("ld",), {}, 30.0, ("compile",),
+                             inputs={"lib.a": "sha256:l"},
+                             outputs=("app",)),
+        }
+        job = Job("job-1", JobSpec(tasks))
+        compile_ = only(job.start()).attempt
+        self.assertEqual(({"a.c": "sha256:c"}, ("a.o",)),
+                         (compile_.inputs, compile_.outputs))
+
+        made = TaskResult(compile_.execution_id, 0, False, {"a.o": "sha256:o"})
+        link = only(job.on_result(made)).attempt
+
+        self.assertEqual({"lib.a": "sha256:l", "a.o": "sha256:o"}, link.inputs)
+        self.assertEqual(("app",), link.outputs)
+        self.assertEqual({"a.o": "sha256:o"},
+                         job.view()["tasks"]["compile"]["outputs"])
+
+
 if __name__ == "__main__":
     unittest.main()
