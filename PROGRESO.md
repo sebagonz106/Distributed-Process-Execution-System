@@ -6,7 +6,7 @@
 
 ## Avance
 
-`██████░░░░` **6 de 10** — plan aprobado, 5 de 9 fases cerradas
+`███████░░░` **7 de 10** — plan aprobado, 6 de 9 fases cerradas
 
 ## Fases
 
@@ -19,7 +19,7 @@
 | ✅ | 3 · Artefactos | Compila en un nodo, enlaza en otro, se descarga el binario | R3 R4 | B | 15 nov |
 | ⬜ | 4 · Logs | `logs -f` en vivo; el log sobrevive al trabajador muerto | R5 | B | 24 nov |
 | ✅ | 5 · Fallos | Un guion por clase de fallo, con su reintento | R6 R8 | A | 15 nov |
-| 🟡 | 6 · Confirmación | El trabajador muere tras guardar: una sola ejecución | R7 | A | 27 nov |
+| ✅ | 6 · Confirmación | El trabajador muere tras guardar: una sola ejecución | R7 | A | 16 nov |
 | ⬜ | 7 · Caché | Reenviar no ejecuta nada; cambiar un fichero recompila solo ese | R9 | B | 28 nov |
 | ⬜ | 8 · Entrega | Demo desde un clon limpio, imagen publicada | — | A y B | 30 nov |
 
@@ -27,7 +27,7 @@
 
 | | R1 | R2 | R3 | R4 | R5 | R6 | R7 | R8 | R9 |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| Estado | ✅ | ✅ | ✅ | ✅ | ⬜ | ✅ | ⬜ | ✅ | ⬜ |
+| Estado | ✅ | ✅ | ✅ | ✅ | ⬜ | ✅ | ✅ | ✅ | ⬜ |
 | Se cumple al cerrar la fase | 2 | 2 | 3 | 3 | 4 | 5 | 6 | 5 | 7 |
 
 ## Transversal
@@ -36,21 +36,11 @@
 |:-:|-----|:-----:|
 | ✅ | Sistema de logs descriptivo, con la traza de un trabajo verificada en la CI ([plan/10](plan/10-sistema-de-logs.md)) | A |
 
-## Fase en curso: 6 · Confirmación (A)
+## Siguiente: 4 · Logs (B) y 7 · Caché (B), después 8 · Entrega (A y B)
 
-| | Parte | Quién |
-|:-:|-------|:-----:|
-| ✅ | Almacén de resultados: el primero que escribe gana (SQLite en el volumen) | A |
-| ✅ | El ejecutor guarda antes de contestar y reintenta el guardado | A |
-| ✅ | El coordinador reconcilia antes de dar un intento por fallido | A |
-| ✅ | Envío idempotente con `Idempotency-Key` | A |
-| ✅ | Corte C6 en local | A |
-| ⬜ | CI en verde en GitHub (falta el push) | — |
-
-Toca dos piezas de la pista B: el ejecutor y el actor del almacén
-([plan/12](plan/12-fase-6-confirmacion-perdida.md)).
-
-Pendientes de B: 4 · Logs de las tareas y 7 · Caché; las dos pueden empezar.
+Las dos de B pueden empezar ya. La Fase 6 tocó dos piezas de su pista, el
+ejecutor y el actor del almacén ([plan/12](plan/12-fase-6-confirmacion-perdida.md));
+la 7 usará los resultados confirmados que guarda ahora el almacén.
 Pruebas hoy: 197 unitarias, 17 de integración, 22 de extremo a extremo y 7
 desde el anfitrión, en verde.
 

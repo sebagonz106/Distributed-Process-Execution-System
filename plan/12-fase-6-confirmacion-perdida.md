@@ -1,7 +1,8 @@
 # 12 — Fase 6: la tarea terminó, pero se perdió la confirmación
 
 - **Fecha:** 2026-11-15
-- **Estado:** en curso
+- **Estado:** cerrada el 2026-11-16. El corte C6 pasó en la CI de GitHub
+  (ejecución 43807400756, commit `42d8a18`). R7 queda cumplido.
 - **Quién:** persona A (Juan Carlos), pista de control
 - **Paso:** Fase 6 de [03-fases-y-dependencias.md](03-fases-y-dependencias.md)
 - **Requisito:** R7 (tratamiento del caso «la tarea terminó, pero se perdió la

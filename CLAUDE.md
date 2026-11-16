@@ -225,10 +225,11 @@ volumen `dpes-data`, `inputs`/`outputs` por tarea, artefactos entre
 dependencias, `PUT`/`GET /blobs` y `artifacts` en el cliente. R3 y R4
 cumplidos.
 
-Fase 6 hecha en local por la persona A ([plan/12](plan/12-fase-6-confirmacion-perdida.md)):
-`store.py`, punto de confirmación en el ejecutor, reconciliación en el
-coordinador, fallo inyectable `lose-ack` y `Idempotency-Key`. Se cierra cuando
-la CI pase en GitHub. Pendientes de B: Fases 4 y 7.
+Fase 6 cerrada el 2026-11-16 por la persona A, con el corte C6 en verde en la
+CI ([plan/12](plan/12-fase-6-confirmacion-perdida.md)): `store.py`, punto de
+confirmación en el ejecutor, reconciliación en el coordinador, fallo inyectable
+`lose-ack` y `Idempotency-Key`. R7 cumplido. Pendientes de B: Fases 4 y 7;
+después, la 8 (de los dos).
 
 Uso desde Windows con el clúster levantado:
 `py -m dpes.cli submit examples/hola/job.json`, `py -m dpes.cli wait <id>`,
