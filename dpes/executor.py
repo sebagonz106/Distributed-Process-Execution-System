@@ -82,7 +82,11 @@ def _confirm(attempt, store, fault, result):
     """Save the result before answering: the confirmation point (plan/12,
     D12.2). Returns the winner, which another attempt may have saved."""
     eid = attempt.execution_id
+    last = None
     for wait in (0, *_SAVE_WAITS):
+        if last:
+            event(_log, logging.WARNING, "result save failed", execution=eid,
+                  error=f"{type(last).__name__}: {last}", retry_in_s=wait)
         time.sleep(wait)
         try:
             winner = store.save_result(attempt.result_key, result)
@@ -101,6 +105,7 @@ def _confirm(attempt, store, fault, result):
 def _place_inputs(attempt, store, workspace):
     """Put every input in place, checked against its digest (D11.4)."""
     eid = attempt.execution_id
+    placed = 0
     for path, name in attempt.inputs.items():
         try:
             data = store.get(name)
@@ -116,6 +121,10 @@ def _place_inputs(attempt, store, workspace):
         os.makedirs(os.path.dirname(target), exist_ok=True)
         with open(target, "wb") as handle:
             handle.write(data)
+        placed += len(data)
+    if attempt.inputs:
+        event(_log, logging.INFO, "inputs placed", execution=eid,
+              files=len(attempt.inputs), bytes=placed)
     return None
 
 
@@ -138,6 +147,10 @@ def _collect_outputs(attempt, store, workspace, outputs, missing):
             return _transfer_failed(attempt.execution_id,
                                     Evidence.OUTPUT_UPLOAD_FAILED,
                                     f"{path}: {error}")
+    if attempt.outputs:
+        event(_log, logging.INFO, "outputs stored",
+              execution=attempt.execution_id, files=len(outputs),
+              missing=len(missing))
     return None
 
 

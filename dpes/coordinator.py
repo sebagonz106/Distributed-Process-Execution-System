@@ -53,6 +53,8 @@ class BlobStore:
         setup()
         self._blobs = BlobDir(root)
         self._results = ResultLog(results_path)
+        event(logging.getLogger("dpes.store"), logging.INFO, "store started",
+              blobs=root, results=results_path)
 
     def put(self, name, data):
         return self._blobs.put(name, data)

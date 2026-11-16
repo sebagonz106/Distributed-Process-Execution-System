@@ -6,9 +6,13 @@ key is new and then reads the row back, so every writer learns the winner.
 
 import dataclasses
 import json
+import logging
 import sqlite3
 
+from dpes.log import event
 from dpes.messages import ResultKey, TaskResult
+
+_log = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS results (
@@ -31,11 +35,20 @@ class ResultLog:
 
     def save(self, key: ResultKey, result: TaskResult) -> TaskResult:
         """Confirm `result` for `key` unless one already is; the winner."""
-        self._db.execute(
+        inserted = self._db.execute(
             "INSERT OR IGNORE INTO results VALUES (?, ?, ?, ?)",
             (key.job_id, key.task, key.round, _encode(result)),
-        )
-        return self.get(key)
+        ).rowcount == 1
+        winner = self.get(key)
+        eid = result.execution_id
+        if inserted:
+            event(_log, logging.INFO, "result saved", execution=eid)
+        elif winner.execution_id == eid:  # its earlier reply was lost
+            event(_log, logging.INFO, "result save repeated", execution=eid)
+        else:
+            event(_log, logging.WARNING, "result already confirmed",
+                  execution=eid, winner=winner.execution_id)
+        return winner
 
     def get(self, key: ResultKey):
         """The confirmed result for `key`, or None."""

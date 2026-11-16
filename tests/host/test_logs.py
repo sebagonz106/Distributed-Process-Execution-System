@@ -89,6 +89,8 @@ class LogTraceTest(unittest.TestCase):
             ("coordinator", "attempt launched", "execution", build),
             ("executor", "attempt running", "execution", build),
             ("executor", "command finished", "execution", build),
+            ("store", "result saved", "execution", build),
+            ("executor", "result confirmed", "execution", build),
             ("coordinator", "attempt succeeded", "execution", build),
             ("executor", "attempt running", "execution", test),
             ("coordinator", "attempt failed", "execution", test),
@@ -117,6 +119,11 @@ class LogTraceTest(unittest.TestCase):
 
         self.assertGreaterEqual(accepted, self.first_time("job started"))
         self.assertLessEqual(accepted, self.first_time("job finished"))
+
+    def test_the_accepted_job_carries_the_clients_idempotency_key(self):
+        (fields,) = [f for _, _, m, f in self.lines if m == "job accepted"]
+
+        self.assertRegex(fields.get("idempotency_key", ""), r"^[0-9a-f]{32}$")
 
     def test_the_executor_names_the_worker_it_ran_on(self):
         hosts = {f["host"] for _, _, m, f in self.lines

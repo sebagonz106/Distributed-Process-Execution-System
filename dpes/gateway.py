@@ -57,8 +57,10 @@ class _Handler(BaseHTTPRequestHandler):
             return self._reject(error.errors)
         except Exception as error:  # whatever broke, the gateway stays up
             return self._unavailable(error)
+        # The key is the client's handle on its resends, not a secret (D10.12).
         event(_log, logging.INFO, "job accepted", job=job_id,
-              tasks=len(spec.tasks))
+              tasks=len(spec.tasks),
+              **({"idempotency_key": key} if key else {}))
         self._send(201, {"job_id": job_id})
 
     def do_PUT(self):
@@ -106,6 +108,7 @@ class _Handler(BaseHTTPRequestHandler):
             return self._unavailable(error)
         if data is None:
             return self._send(404, {"error": "unknown blob"})
+        event(_log, logging.INFO, "blob served", digest=name, bytes=len(data))
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(len(data)))

@@ -19,6 +19,45 @@ def result(execution_id, exit_code=0):
     )
 
 
+class ResultLogTraceTest(unittest.TestCase):
+    """Who won each confirmation is in the log (plan/10, D10.11)."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.log = ResultLog(os.path.join(directory.name, "r.sqlite"))
+        self.addCleanup(self.log.close)
+
+    def save(self, level, execution_id):
+        with self.assertLogs("dpes.store", level) as caught:
+            self.log.save(KEY, result(execution_id))
+        (record,) = caught.records
+        return record.getMessage(), record.levelname, record.fields
+
+    def test_the_first_confirmation_is_logged_as_saved(self):
+        message, level, fields = self.save("INFO", "job-1/compile/0/1")
+
+        self.assertEqual(("result saved", "INFO"), (message, level))
+        self.assertEqual("job-1/compile/0/1", fields["execution"])
+
+    def test_the_same_attempt_saving_again_is_a_repeat(self):
+        self.log.save(KEY, result("job-1/compile/0/1"))
+
+        message, level, _ = self.save("INFO", "job-1/compile/0/1")
+
+        self.assertEqual(("result save repeated", "INFO"), (message, level))
+
+    def test_a_later_attempt_learns_another_one_won(self):
+        self.log.save(KEY, result("job-1/compile/0/1"))
+
+        message, level, fields = self.save("WARNING", "job-1/compile/0/2")
+
+        self.assertEqual(("result already confirmed", "WARNING"),
+                         (message, level))
+        self.assertEqual(("job-1/compile/0/2", "job-1/compile/0/1"),
+                         (fields["execution"], fields["winner"]))
+
+
 class ResultLogTest(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()

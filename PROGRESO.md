@@ -1,6 +1,6 @@
 # Progreso
 
-**Entrega:** martes 1 dic 2026 · **Actualizado:** 15 nov 2026
+**Entrega:** martes 1 dic 2026 · **Actualizado:** 16 nov 2026
 
 ✅ hecho · 🟡 en curso · ⬜ pendiente
 
@@ -35,13 +35,14 @@
 | | Qué | Quién |
 |:-:|-----|:-----:|
 | ✅ | Sistema de logs descriptivo, con la traza de un trabajo verificada en la CI ([plan/10](plan/10-sistema-de-logs.md)) | A |
+| ✅ | Trazas de lo construido después: artefactos, almacén de resultados e idempotencia ([plan/10 §2.1](plan/10-sistema-de-logs.md)) | B |
 
 ## Siguiente: 4 · Logs (B) y 7 · Caché (B), después 8 · Entrega (A y B)
 
 Las dos de B pueden empezar ya. La Fase 6 tocó dos piezas de su pista, el
 ejecutor y el actor del almacén ([plan/12](plan/12-fase-6-confirmacion-perdida.md));
 la 7 usará los resultados confirmados que guarda ahora el almacén.
-Pruebas hoy: 197 unitarias, 17 de integración, 22 de extremo a extremo y 7
+Pruebas hoy: 204 unitarias, 17 de integración, 22 de extremo a extremo y 8
 desde el anfitrión, en verde.
 
 Los contratos de `dpes/messages.py` quedaron congelados al cerrar la Fase 1

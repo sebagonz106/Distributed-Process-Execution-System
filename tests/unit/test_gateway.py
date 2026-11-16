@@ -274,6 +274,29 @@ class GatewayLogTest(ServerTestCase):
 
         self.assertEqual("coordinator unavailable", record.getMessage())
 
+    def test_an_idempotency_key_is_logged_with_the_job(self):
+        request = urllib.request.Request(
+            self.url + "/jobs", json.dumps(HELLO_JOB).encode(),
+            headers={"Idempotency-Key": "retry-7"}, method="POST",
+        )
+        with self.assertLogs("dpes.gateway", "INFO") as caught:
+            urllib.request.urlopen(request).close()
+
+        (record,) = caught.records
+        self.assertEqual("retry-7", record.fields["idempotency_key"])
+
+    def test_a_downloaded_blob_is_logged(self):
+        name = digest(b"bin")
+        self.coordinator.blobs[name] = b"bin"
+
+        with self.assertLogs("dpes.gateway", "INFO") as caught:
+            urllib.request.urlopen(f"{self.url}/blobs/{name}").close()
+
+        (record,) = caught.records
+        self.assertEqual(("blob served", name, 3),
+                         (record.getMessage(), record.fields["digest"],
+                          record.fields["bytes"]))
+
     def test_status_polling_stays_below_info(self):
         self.coordinator.views["job-1"] = [view("RUNNING")]
 

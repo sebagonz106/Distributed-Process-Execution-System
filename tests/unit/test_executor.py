@@ -241,6 +241,32 @@ class ExecutorLogTest(unittest.TestCase):
         self.assertEqual("result confirmed", confirmed.getMessage())
         self.assertEqual("job-1/t/0/1", confirmed.fields["winner"])
 
+    def fields_of(self, records, message):
+        (record,) = [r for r in records if r.getMessage() == message]
+        return record.fields
+
+    def test_placed_inputs_and_stored_outputs_are_counted(self):
+        store = Blobs()
+        name = store.put(b"hola\n")
+        work = attempt("cp a.txt b.txt", inputs={"a.txt": name},
+                       outputs=("b.txt", "never.txt"))
+
+        records = self.logged("INFO", lambda: execute(work, store))
+
+        placed = self.fields_of(records, "inputs placed")
+        stored = self.fields_of(records, "outputs stored")
+        self.assertEqual((1, 5), (placed["files"], placed["bytes"]))
+        self.assertEqual((1, 1), (stored["files"], stored["missing"]))
+        self.assertEqual("job-1/t/0/1", stored["execution"])
+
+    def test_a_failed_result_save_is_a_warning_before_its_retry(self):
+        records = self.logged("WARNING",
+                              lambda: execute(attempt("true"), SavesFirst(1)))
+
+        fields = self.fields_of(records, "result save failed")
+        self.assertEqual("job-1/t/0/1", fields["execution"])
+        self.assertEqual(executor._SAVE_WAITS[0], fields["retry_in_s"])
+
     def test_neither_the_environment_nor_the_output_reaches_the_log(self):
         secret = attempt("echo printed-output", env={"TOKEN": "hunter2"})
 
