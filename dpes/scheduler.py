@@ -75,17 +75,26 @@ class Job:
         if name and self._tasks[name].state is State.RETRY_WAIT:
             self._tasks[name].state = State.RUNNING
 
-    def on_result(self, result: TaskResult) -> list[Launch]:
-        name = self._running.pop(result.execution_id, None)
+    def on_result(self, result: TaskResult, execution_id: str = "",
+                  note: str = "") -> list[Launch]:
+        """Settle attempt `execution_id` (by default, the one that produced
+        `result`). The result may come from another attempt of the same
+        round: adopted by reconciliation, or the winner of the save
+        (plan/12, D12.5). `note` says so in the history."""
+        execution_id = execution_id or result.execution_id
+        name = self._running.pop(execution_id, None)
         if name is None:
             return []  # duplicate, late or unknown: ignored (D07.6)
+        if result.execution_id != execution_id and not note:
+            note = f"confirmed result of {result.execution_id}"
         task = self._tasks[name]
         task.result = result
         if not result.succeeded:
-            return self._failed(name, FailureClass.TASK, _reason(result))
+            reason = _reason(result) + (f"; {note}" if note else "")
+            return self._failed(name, FailureClass.TASK, reason)
         task.state = State.SUCCEEDED
         task.error = task.failure_class = None
-        self._record(task, "SUCCEEDED", "", None)
+        self._record(task, "SUCCEEDED", note, None)
         return self._settled(name)
 
     def on_failure(self, execution_id: str, failure_class: FailureClass,

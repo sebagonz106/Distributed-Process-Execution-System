@@ -19,6 +19,7 @@ MAX_BLOB = 16 << 20  # blobs travel whole in memory (plan/11, D11.5)
 PORT = 8000
 _JOB_PATH = re.compile(r"/jobs/([^/]+)")
 _BLOB_PATH = re.compile(r"/blobs/(sha256:[0-9a-f]{64})")
+_KEY = re.compile(r"[A-Za-z0-9_-]{1,64}")  # idempotency key (plan/12, D12.7)
 # Not __name__: run with `python -m`, this module is "__main__", outside the
 # "dpes" logger tree that setup() configures, and every line would be lost.
 _log = logging.getLogger("dpes.gateway")
@@ -47,9 +48,12 @@ class _Handler(BaseHTTPRequestHandler):
             spec = parse_job(document)
         except SpecError as error:
             return self._reject(error.errors)
+        key = self.headers.get("Idempotency-Key")
+        if key is not None and not _KEY.fullmatch(key):
+            return self._reject(["Idempotency-Key: 1-64 of [A-Za-z0-9_-]"])
         try:
-            job_id = self.server.coordinator.submit(spec)
-        except SpecError as error:  # valid, but no node could run it (D08.3)
+            job_id = self.server.coordinator.submit(spec, key)
+        except SpecError as error:  # cannot run, or a reused key (D12.7)
             return self._reject(error.errors)
         except Exception as error:  # whatever broke, the gateway stays up
             return self._unavailable(error)

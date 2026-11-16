@@ -224,6 +224,55 @@ class DagTest(unittest.TestCase):
         self.assertEqual(State.ERROR, job.state)
 
 
+class AdoptedResultTest(unittest.TestCase):
+    """plan/12, D12.5: an attempt resolved with another attempt's result."""
+
+    def setUp(self):
+        self.job = make_job(retries={"task": 0, "worker": 3, "network": 3})
+        self.eid = only(self.job.start()).attempt.execution_id
+        self.earlier = result("job-1/hello/0/0", output_tail="done\n")
+
+    def history(self):
+        return self.job.view()["tasks"]["hello"]["attempts"]
+
+    def test_an_adopted_result_settles_the_attempt_in_flight(self):
+        note = "adopted by reconciliation after WorkerCrashedError"
+
+        launches = self.job.on_result(self.earlier, self.eid, note)
+
+        self.assertEqual([], launches)
+        self.assertEqual(State.SUCCEEDED, self.job.state)
+        self.assertEqual(
+            [{"execution_id": self.eid, "outcome": "SUCCEEDED",
+              "reason": note, "retry_in_s": None}],
+            self.history(),
+        )
+        self.assertEqual("done\n",
+                         self.job.view()["tasks"]["hello"]["output"])
+
+    def test_a_winner_from_another_attempt_says_whose_it_is(self):
+        self.job.on_result(self.earlier, self.eid)
+
+        self.assertIn("job-1/hello/0/0", self.history()[0]["reason"])
+
+    def test_an_adopted_task_failure_is_still_a_task_failure(self):
+        failed = result("job-1/hello/0/0", exit_code=2)
+
+        self.job.on_result(failed, self.eid, "adopted by reconciliation")
+
+        self.assertEqual(State.FAILED, self.job.state)
+        self.assertIn("exit code 2", self.history()[0]["reason"])
+
+    def test_a_duplicate_after_adoption_changes_nothing(self):
+        self.job.on_result(self.earlier, self.eid, "adopted")
+
+        self.assertEqual([], self.job.on_result(result(self.eid,
+                                                       exit_code=1)))
+        self.assertEqual([], self.job.on_result(self.earlier, self.eid))
+        self.assertEqual(State.SUCCEEDED, self.job.state)
+        self.assertEqual(1, len(self.history()))
+
+
 class RetryTest(unittest.TestCase):
     def setUp(self):
         self.budget = {"task": 0, "worker": 0, "network": 0}

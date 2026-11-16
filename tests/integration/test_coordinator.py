@@ -6,12 +6,12 @@ Run inside the control node:
         python -m unittest discover -s tests/integration
 """
 
+import os
+import tempfile
 import time
 import unittest
 
 import ray
-
-import tempfile
 
 from dpes.coordinator import BlobStore, Coordinator, _Client
 from dpes.hashing import digest
@@ -34,6 +34,12 @@ def stand_in_executor(attempt, store):
         time.sleep(15)
     if program == "garbage":
         return "not a result"
+    if program == "lose-ack" and number == 1:
+        # The task ends and is saved, but its answer never arrives.
+        saved = TaskResult(attempt.execution_id, 0, False, {},
+                           output_tail="saved\n")
+        store.save_result(attempt.result_key, saved)
+        os._exit(1)
     exit_code = int(program) if program.isdigit() else 0
     return TaskResult(attempt.execution_id, exit_code, False, {})
 
@@ -54,7 +60,9 @@ class CoordinatorTestCase(unittest.TestCase):
         # Quiet: these check states; tests/host checks the logs.
         ray.init(address="auto", logging_level="ERROR",
                  ignore_reinit_error=True, log_to_driver=False)
-        cls.store = BlobStore.remote(tempfile.mkdtemp(prefix="dpes-store-"))
+        folder = tempfile.mkdtemp(prefix="dpes-store-")
+        cls.store = BlobStore.remote(os.path.join(folder, "blobs"),
+                                     os.path.join(folder, "results.sqlite"))
         cls.coordinator = Coordinator.remote(
             stand_in_executor, cls.store, queue_timeout_s=cls.queue_timeout_s
         )
@@ -196,6 +204,38 @@ class RetryTest(CoordinatorTestCase):
                          (attempts[0]["outcome"], attempts[0]["reason"]))
         self.assertGreater(attempts[0]["retry_in_s"], 0)
         self.assertLess(time.monotonic() - started, 15, "deadline too late")
+
+
+class LostConfirmationTest(CoordinatorTestCase):
+    """plan/12: the task ended and was saved, but its answer was lost."""
+
+    def test_a_saved_result_is_adopted_instead_of_running_again(self):
+        view = self.run_one("lose-ack")
+
+        task = view["tasks"]["t"]
+        (attempt,) = task["attempts"]
+        self.assertEqual("SUCCEEDED", view["state"])
+        self.assertEqual("SUCCEEDED", attempt["outcome"])
+        self.assertIn("adopted by reconciliation", attempt["reason"])
+        self.assertEqual("saved\n", task["output"])
+
+    def test_the_same_key_and_job_give_the_same_job_id(self):
+        spec = job(t={"command": ["0"]})
+
+        first = ray.get(self.coordinator.submit.remote(spec, "key-1"))
+        again = ray.get(self.coordinator.submit.remote(spec, "key-1"))
+
+        self.assertEqual(first, again)
+
+    def test_the_same_key_for_another_job_is_refused(self):
+        _Client(self.coordinator, self.store).submit(
+            job(t={"command": ["0"]}), "key-2")
+
+        with self.assertRaises(SpecError) as caught:
+            _Client(self.coordinator, self.store).submit(
+                job(t={"command": ["3"]}), "key-2")
+
+        self.assertIn("key-2", caught.exception.errors[0])
 
 
 class QueueDeadlineTest(CoordinatorTestCase):

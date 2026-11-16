@@ -15,7 +15,13 @@ from dpes.messages import Attempt, Evidence, ExecutorFailure, TaskResult
 
 
 class Blobs(dict):
-    """In-memory store with the executor's interface (plan/11, D11.5)."""
+    """In-memory store with the executor's interface (plan/11, D11.5;
+    plan/12, D12.1): blobs, and results where the first writer wins."""
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.results = {}
+        self.saves = []
 
     def get(self, name):
         return super().get(name)
@@ -23,6 +29,10 @@ class Blobs(dict):
     def put(self, data):
         self[digest(data)] = data
         return digest(data)
+
+    def save_result(self, key, result):
+        self.saves.append((key, result))
+        return self.results.setdefault(key, result)
 
 
 def execute(attempt, store=None):
@@ -73,6 +83,71 @@ class ExecuteTest(unittest.TestCase):
 
         self.assertIsInstance(outcome, ExecutorFailure)
         self.assertEqual(Evidence.WORKSPACE_FAILED, outcome.evidence)
+
+
+class SavesFirst(Blobs):
+    """Fails the first `failures` saves, as a lost store reply would."""
+
+    def __init__(self, failures):
+        super().__init__()
+        self.failures = failures
+
+    def save_result(self, key, result):
+        self.saves.append((key, result))
+        if len(self.saves) <= self.failures:
+            raise ConnectionError("store unreachable")
+        return self.results.setdefault(key, result)
+
+
+@mock.patch("dpes.executor._SAVE_WAITS", (0, 0, 0))
+class ConfirmationTest(unittest.TestCase):
+    def test_a_result_is_confirmed_before_it_is_returned(self):
+        store = Blobs()
+
+        result = execute(attempt("echo hi"), store)
+
+        self.assertEqual({attempt("x").result_key: result}, store.results)
+
+    def test_a_failing_command_is_confirmed_too(self):
+        store = Blobs()
+
+        result = execute(attempt("exit 3"), store)
+
+        self.assertEqual(3, store.results[attempt("x").result_key].exit_code)
+        self.assertEqual(3, result.exit_code)
+
+    def test_the_winner_is_returned_when_another_attempt_saved_first(self):
+        store = Blobs()
+        earlier = TaskResult("job-1/t/0/1", 0, False, {}, output_tail="old\n")
+        store.results[attempt("x").result_key] = earlier
+
+        result = execute(attempt("echo new", execution_id="job-1/t/0/2"),
+                         store)
+
+        self.assertEqual(earlier, result)
+
+    def test_a_failed_save_is_retried_with_the_same_key_and_result(self):
+        store = SavesFirst(failures=2)
+
+        result = execute(attempt("echo hi"), store)
+
+        self.assertIsInstance(result, TaskResult)
+        self.assertEqual(3, len(store.saves))
+        self.assertTrue(all(save == store.saves[0] for save in store.saves))
+
+    def test_a_save_that_never_succeeds_is_a_result_save_failure(self):
+        failure = execute(attempt("echo hi"), SavesFirst(failures=99))
+
+        self.assertIsInstance(failure, ExecutorFailure)
+        self.assertEqual(Evidence.RESULT_SAVE_FAILED, failure.evidence)
+
+    def test_no_result_is_saved_when_the_executor_itself_failed(self):
+        store = Blobs()
+
+        execute(attempt("true", inputs={"a": digest(b"never uploaded")}),
+                store)
+
+        self.assertEqual([], store.saves)
 
 
 class Broken:
@@ -156,13 +231,15 @@ class ExecutorLogTest(unittest.TestCase):
     def test_an_attempt_logs_where_it_ran_and_how_it_ended(self):
         records = self.logged("INFO", lambda: execute(attempt("exit 4")))
 
-        running, finished = records
+        running, finished, confirmed = records
         self.assertEqual("attempt running", running.getMessage())
         self.assertEqual("job-1/t/0/1", running.fields["execution"])
         self.assertIn("host", running.fields)
         self.assertEqual("command finished", finished.getMessage())
         self.assertEqual(4, finished.fields["exit_code"])
         self.assertEqual("job-1/t/0/1", finished.fields["execution"])
+        self.assertEqual("result confirmed", confirmed.getMessage())
+        self.assertEqual("job-1/t/0/1", confirmed.fields["winner"])
 
     def test_neither_the_environment_nor_the_output_reaches_the_log(self):
         secret = attempt("echo printed-output", env={"TOKEN": "hunter2"})
@@ -207,6 +284,15 @@ class InjectedFaultTest(unittest.TestCase):
             [outcome.evidence for outcome in outcomes[:2]],
         )
         self.assertEqual("ran\n", outcomes[2].output_tail)
+
+    def test_lose_ack_ends_the_process_after_the_result_is_saved(self):
+        store = Blobs()
+
+        with mock.patch("os._exit", side_effect=Stopped):
+            with self.assertRaises(Stopped):
+                execute(self.numbered(1, "lose-ack:1"), store)
+
+        self.assertEqual(1, len(store.results))
 
     def test_crash_ends_the_executor_process(self):
         with mock.patch("os._exit", side_effect=Stopped) as exit_:

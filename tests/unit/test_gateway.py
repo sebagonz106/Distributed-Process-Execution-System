@@ -8,6 +8,7 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
+from unittest import mock
 
 from dpes import cli
 from dpes.gateway import MAX_BLOB, MAX_BODY, make_server
@@ -25,9 +26,11 @@ class FakeCoordinator:
         self.views = {}  # job id -> snapshots returned in order, last repeats
         self.broken = False
         self.unschedulable = []  # errors the cluster check would report
+        self.keys = []  # idempotency key of each submission (plan/12)
         self.blobs = {}
 
-    def submit(self, spec):
+    def submit(self, spec, key=None):
+        self.keys.append(key)
         if self.broken:
             raise ConnectionError("coordinator unreachable")
         if self.unschedulable:
@@ -187,6 +190,60 @@ class BlobTest(ServerTestCase):
         status, _ = self.request("POST", "/jobs", json.dumps(job).encode())
 
         self.assertEqual(400, status)
+
+
+class IdempotencyKeyTest(ServerTestCase):
+    """plan/12, D12.7."""
+
+    def post_with_key(self, key):
+        request = urllib.request.Request(
+            self.url + "/jobs", json.dumps(HELLO_JOB).encode(),
+            headers={"Idempotency-Key": key}, method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request) as response:
+                return response.status
+        except urllib.error.HTTPError as error:
+            with error:
+                return error.code
+
+    def test_the_key_reaches_the_coordinator(self):
+        self.assertEqual(201, self.post_with_key("retry-safe_1"))
+        self.assertEqual(["retry-safe_1"], self.coordinator.keys)
+
+    def test_a_job_sent_without_a_key_has_none(self):
+        self.request("POST", "/jobs", json.dumps(HELLO_JOB).encode())
+
+        self.assertEqual([None], self.coordinator.keys)
+
+    def test_a_malformed_key_is_rejected_before_submitting(self):
+        for key in ("has space", "x" * 65, "a/b"):
+            with self.subTest(key=key):
+                self.assertEqual(400, self.post_with_key(key))
+        self.assertEqual([], self.coordinator.keys)
+
+    def test_the_client_sends_a_key_and_retries_with_the_same_one(self):
+        job_file = CliTest.write_job(self, HELLO_JOB)
+        answers = [cli.GatewayUnreachable("refused"), b'{"job_id": "job-1"}']
+        with mock.patch.object(cli, "_request", side_effect=answers) as sent:
+            with mock.patch.object(cli.time, "sleep"):
+                code = cli.main(["--url", self.url, "submit", job_file])
+
+        keys = [call.kwargs["headers"]["Idempotency-Key"]
+                for call in sent.call_args_list]
+        self.assertEqual(0, code)
+        self.assertEqual(2, len(keys))
+        self.assertEqual(keys[0], keys[1])
+
+    def test_the_client_gives_up_after_three_tries(self):
+        job_file = CliTest.write_job(self, HELLO_JOB)
+        down = cli.GatewayUnreachable("refused")
+        with mock.patch.object(cli, "_request", side_effect=[down] * 3):
+            with mock.patch.object(cli.time, "sleep"):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    code = cli.main(["--url", self.url, "submit", job_file])
+
+        self.assertEqual(cli.EXIT_REQUEST_FAILED, code)
 
 
 class GatewayLogTest(ServerTestCase):

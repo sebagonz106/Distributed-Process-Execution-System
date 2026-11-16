@@ -21,12 +21,14 @@ from dpes.log import event, setup
 from dpes.messages import ExecutorFailure, TaskResult
 from dpes.scheduler import Job, State
 from dpes.spec import SpecError, demand, unschedulable
+from dpes.store import ResultLog
 
 NAMESPACE = "dpes"
 NAME = "coordinator"
 CALL_TIMEOUT_S = 10
 STORE_NAME = "store"
 STORE_ROOT = "/var/lib/dpes/blobs"  # a Docker volume on the control node
+RESULTS_PATH = "/var/lib/dpes/results.sqlite"  # same volume (plan/12)
 STORE_TIMEOUT_S = 60  # a 16 MiB blob crosses the network
 QUEUE_TIMEOUT_S = 3600.0  # launch to start signal (D09.4)
 RUN_MARGIN_S = 5.0  # past the task's own time limit, silence is a failure
@@ -44,11 +46,13 @@ def _attempt(execute, attempt, coordinator, store):
 
 @ray.remote(num_cpus=0, max_restarts=0)
 class BlobStore:
-    """The content-addressed store on the control node (plan/11, D11.5)."""
+    """The store on the control node: content-addressed blobs (plan/11,
+    D11.5) and confirmed results, first writer wins (plan/12, D12.1)."""
 
-    def __init__(self, root):
+    def __init__(self, root, results_path):
         setup()
         self._blobs = BlobDir(root)
+        self._results = ResultLog(results_path)
 
     def put(self, name, data):
         return self._blobs.put(name, data)
@@ -58,6 +62,12 @@ class BlobStore:
 
     def missing(self, names):
         return self._blobs.missing(names)
+
+    def save_result(self, key, result):
+        return self._results.save(key, result)
+
+    def result(self, key):
+        return self._results.get(key)
 
 
 class _StoreClient:
@@ -72,6 +82,10 @@ class _StoreClient:
     def put(self, data):
         reply = self._actor.put.remote(digest(data), data)
         return ray.get(reply, timeout=STORE_TIMEOUT_S)
+
+    def save_result(self, key, result):
+        reply = self._actor.save_result.remote(key, result)
+        return ray.get(reply, timeout=CALL_TIMEOUT_S)
 
 
 @ray.remote(num_cpus=0, max_restarts=0)
@@ -88,14 +102,29 @@ class Coordinator:
         self._queue_timeout_s = queue_timeout_s
         self._me = ray.get_runtime_context().current_actor
         self._jobs = {}
+        self._by_key = {}  # idempotency key -> job id (plan/12, D12.7)
         self._submitted_at = {}  # job id -> monotonic time, until it finishes
         self._started = {}  # execution id -> event set by the start signal
         self._in_flight = set()  # asyncio keeps only weak references to tasks
         event(_log, logging.INFO, "coordinator started",
               queue_timeout_s=queue_timeout_s)
 
-    async def submit(self, spec) -> str:
+    async def submit(self, spec, key=None) -> str:
+        """Start `spec` as a new job, unless `key` already started it."""
+        # No await before the key is recorded: two submissions with the same
+        # key cannot interleave here.
+        if key in self._by_key:
+            known = self._jobs[self._by_key[key]]
+            if known.spec != spec:
+                raise ValueError(
+                    f"idempotency key {key!r} was used for a different job"
+                )
+            event(_log, logging.INFO, "job resubmitted", job=known.job_id,
+                  key=key)
+            return known.job_id
         job = Job(uuid.uuid4().hex, spec)
+        if key:
+            self._by_key[key] = job.job_id
         self._jobs[job.job_id] = job
         self._submitted_at[job.job_id] = time.monotonic()
         launches = job.start()
@@ -141,14 +170,26 @@ class Coordinator:
             else:  # the executor broke its contract
                 observed = f"executor returned {type(outcome).__name__}"
 
+        note = ""
+        if not isinstance(observed, TaskResult):
+            # The task may have ended and been saved, with only its answer
+            # lost: ask the store before calling it a failure (D12.4).
+            saved = await self._confirmed(attempt)
+            if saved is not None:
+                note = f"adopted by reconciliation after {_describe(observed)}"
+                event(_log, logging.INFO, "result adopted by reconciliation",
+                      execution=eid, producer=saved.execution_id,
+                      after=_describe(observed))
+                observed = saved
+
         if isinstance(observed, TaskResult) and observed.succeeded:
             event(_log, logging.INFO, "attempt succeeded", execution=eid)
-            unblocked = job.on_result(observed)
+            unblocked = job.on_result(observed, eid, note)
         elif isinstance(observed, TaskResult):
             event(_log, logging.WARNING, "attempt failed", execution=eid,
                   failure_class=classify(observed).value,
                   exit_code=observed.exit_code, timed_out=observed.timed_out)
-            unblocked = job.on_result(observed)
+            unblocked = job.on_result(observed, eid, note)
         else:
             failure_class = classify(observed)
             reason = _describe(observed)
@@ -162,6 +203,19 @@ class Coordinator:
                   delay_s=round(retry.delay_s, 3))
         self._launch(job, unblocked)
         self._log_if_finished(job)
+
+    async def _confirmed(self, attempt):
+        """The result saved under the attempt's key, or None (D12.4)."""
+        reply = self._store.result.remote(attempt.result_key)
+        try:
+            return await asyncio.wait_for(
+                asyncio.wrap_future(reply.future()), CALL_TIMEOUT_S
+            )
+        except Exception as error:  # store unreachable: the failure stands
+            event(_log, logging.WARNING, "reconciliation failed",
+                  execution=attempt.execution_id,
+                  error=type(error).__name__)
+            return None
 
     async def _outcome(self, job, attempt):
         """What the attempt returned. Raises _Silent past its deadlines, or
@@ -248,7 +302,7 @@ class _Client:
         self._actor = actor
         self._store = store
 
-    def submit(self, spec):
+    def submit(self, spec, key=None):
         # Refused here, not queued forever in Ray (plan/08, D08.3).
         live = [node["Resources"] for node in ray.nodes() if node["Alive"]]
         errors = unschedulable(spec, live)
@@ -262,7 +316,13 @@ class _Client:
                    for name, path, blob in wanted if blob in absent]
         if errors:
             raise SpecError(errors)
-        return ray.get(self._actor.submit.remote(spec), timeout=CALL_TIMEOUT_S)
+        reply = self._actor.submit.remote(spec, key)
+        try:
+            return ray.get(reply, timeout=CALL_TIMEOUT_S)
+        except ray.exceptions.RayTaskError as error:
+            if isinstance(error.cause, ValueError):  # reused key (D12.7)
+                raise SpecError([str(error.cause)]) from None
+            raise
 
     def status(self, job_id):
         reply = self._actor.status.remote(job_id)
@@ -289,7 +349,7 @@ def connect() -> _Client:
         lifetime="detached",
         get_if_exists=True,
         scheduling_strategy=here,  # its folder is this node's volume (D11.5)
-    ).remote(STORE_ROOT)
+    ).remote(STORE_ROOT, RESULTS_PATH)
     actor = Coordinator.options(
         name=NAME,
         lifetime="detached",  # survives a gateway restart

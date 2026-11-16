@@ -14,6 +14,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 
 from dpes.hashing import digest
 from dpes.spec import is_workspace_path
@@ -24,6 +25,13 @@ EXIT_REQUEST_FAILED = 3  # rejected, unknown job or gateway unreachable
 
 class RequestFailed(Exception):
     pass
+
+
+class GatewayUnreachable(RequestFailed):
+    """No answer at all: the request may or may not have arrived."""
+
+
+SUBMIT_TRIES = 3
 
 
 def main(argv=None) -> int:
@@ -78,7 +86,17 @@ def _submit(base, job_file):
                 for path in task["inputs"]
             }
     body = json.dumps(document).encode()
-    return _call(f"{base}/jobs", body)["job_id"]
+    # The same key on every try: if a reply was lost, the gateway answers
+    # with the job it already created instead of a second one (D12.7).
+    headers = {"Idempotency-Key": uuid.uuid4().hex}
+    for tries_left in range(SUBMIT_TRIES - 1, -1, -1):
+        try:
+            reply = _request(f"{base}/jobs", body, headers=headers)
+            return json.loads(reply)["job_id"]
+        except GatewayUnreachable:
+            if not tries_left:
+                raise
+            time.sleep(1)
 
 
 def _upload(base, path):
@@ -108,8 +126,8 @@ def _call(url, body=None):
     return json.loads(_request(url, body))
 
 
-def _request(url, body=None, method=None):
-    request = urllib.request.Request(url, body, method=method)
+def _request(url, body=None, method=None, headers=None):
+    request = urllib.request.Request(url, body, headers or {}, method=method)
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             return response.read()
@@ -118,7 +136,7 @@ def _request(url, body=None, method=None):
             detail = _detail(error)
         raise RequestFailed(f"HTTP {error.code}: {detail}") from None
     except urllib.error.URLError as error:
-        raise RequestFailed(
+        raise GatewayUnreachable(
             f"cannot reach the gateway at {url}: {error.reason}"
         ) from None
 

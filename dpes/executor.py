@@ -17,11 +17,14 @@ from dpes.log import event
 from dpes.messages import Attempt, Evidence, ExecutorFailure, TaskResult
 
 _HANG_S = 3600  # longer than any deadline: the coordinator cancels first
+_SAVE_WAITS = (0.5, 1, 2)  # seconds before each retry of the save (D12.3)
+_FAULTS = ("crash", "hang", "network", "lose-ack")
 _log = logging.getLogger(__name__)
 
 
 def execute(attempt: Attempt, store):
-    """`store` has get(digest) -> bytes or None, and put(bytes) -> digest."""
+    """`store` has get(digest) -> bytes or None, put(bytes) -> digest, and
+    save_result(key, result) -> the confirmed result for that key."""
     eid = attempt.execution_id
     # Program and argument count only: arguments and env may hold secrets.
     event(_log, logging.INFO, "attempt running", execution=eid,
@@ -65,14 +68,34 @@ def execute(attempt: Attempt, store):
                 return failure
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
-    return TaskResult(
+    return _confirm(attempt, store, fault, TaskResult(
         execution_id=eid,
         exit_code=outcome.exit_code,
         timed_out=outcome.timed_out,
         outputs=outputs,
         missing_outputs=tuple(missing),
         output_tail=outcome.output,
-    )
+    ))
+
+
+def _confirm(attempt, store, fault, result):
+    """Save the result before answering: the confirmation point (plan/12,
+    D12.2). Returns the winner, which another attempt may have saved."""
+    eid = attempt.execution_id
+    for wait in (0, *_SAVE_WAITS):
+        time.sleep(wait)
+        try:
+            winner = store.save_result(attempt.result_key, result)
+            break
+        except Exception as error:  # the store or the way to it failed
+            last = error
+    else:
+        return _transfer_failed(eid, Evidence.RESULT_SAVE_FAILED, str(last))
+    event(_log, logging.INFO, "result confirmed", execution=eid,
+          winner=winner.execution_id)
+    if fault == "lose-ack":
+        os._exit(1)  # saved, but the answer never leaves (D12.6)
+    return winner
 
 
 def _place_inputs(attempt, store, workspace):
@@ -134,7 +157,7 @@ def _injected_fault(attempt):
         return None
     kind, _, count = attempt.env.get("DPES_FAULT", "").partition(":")
     number = int(attempt.execution_id.rsplit("/", 1)[1])
-    if kind not in ("crash", "hang", "network") or not count.isdigit():
+    if kind not in _FAULTS or not count.isdigit():
         return None
     return kind if number <= int(count) else None
 
