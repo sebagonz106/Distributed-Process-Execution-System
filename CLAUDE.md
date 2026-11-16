@@ -164,6 +164,10 @@ decisión aprobada requiere una decisión nueva que la sustituya.
   módulos con efectos registran con `dpes.log.event(logger, nivel, mensaje,
   **campos)`, siempre con `execution=` o `job=`; los módulos puros no registran;
   nunca se registra el entorno ni la salida de una tarea (D10.4–D10.6).
+- [plan/13-informe-tecnico.md](plan/13-informe-tecnico.md): informe técnico
+  del estado al 2026-11-16 (commit `dd605e8`): requisitos con su evidencia,
+  arquitectura construida, garantías, verificación, desviaciones, límites y lo
+  que falta.
 
 Al empezar una fase se crea su documento con el siguiente número libre (D04.5).
 
