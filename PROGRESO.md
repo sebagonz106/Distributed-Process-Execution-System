@@ -47,7 +47,7 @@ De la 8, la parte A va adelantada: el coordinador ya sobrevive a su reinicio
 (F7.7, [plan/14](plan/14-fase-8-recuperacion-del-coordinador.md)). Le queda la
 comparación arquitectónica.
 Pruebas hoy: 215 unitarias, 21 de integración, 23 de extremo a extremo y 8
-desde el anfitrión, en verde en el clúster local.
+desde el anfitrión, en verde en la CI.
 
 Los contratos de `dpes/messages.py` quedaron congelados al cerrar la Fase 1
 sin que B los revisara; cambiarlos ahora requiere una decisión escrita

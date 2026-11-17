@@ -244,7 +244,7 @@ Fase 8 en curso. La persona A hizo F7.7 el 2026-11-16
 ([plan/14](plan/14-fase-8-recuperacion-del-coordinador.md)): diario
 `/var/lib/dpes/coordinator.sqlite`, `max_restarts=-1`, `recover()` y un
 cliente que atraviesa el 503 de un reinicio; el corte es
-`tests/e2e/test_restart.py`. A le queda la comparación arquitectónica (T5); la
+`tests/e2e/test_restart.py`, en verde en la CI (ejecución 44005921209). A le queda la comparación arquitectónica (T5); la
 publicación de la imagen (T3), la guía y la demostración son de B.
 
 Uso desde Windows con el clúster levantado:

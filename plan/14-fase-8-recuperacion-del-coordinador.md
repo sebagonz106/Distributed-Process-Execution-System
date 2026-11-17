@@ -1,8 +1,9 @@
 # 14 — Fase 8, parte A: el coordinador sobrevive a su reinicio
 
 - **Fecha:** 2026-11-16
-- **Estado:** en curso. F7.7 está hecha y en verde en el clúster local
-  (2026-11-16); falta pasarla por la CI
+- **Estado:** en curso. F7.7 se cerró el 2026-11-16: el corte del reinicio
+  pasó en la CI de GitHub (ejecución 44005921209, commit `0d309a9`). Queda la
+  comparación arquitectónica (T5)
 - **Quién:** persona A (Juan Carlos), pista de control
 - **Paso:** Fase 8 de [03-fases-y-dependencias.md](03-fases-y-dependencias.md),
   en la parte que el calendario da a la persona A
@@ -179,9 +180,9 @@
 | Integración | `tests/integration/test_coordinator.py` | Tras matar el actor: un resultado guardado se adopta sin repetir; un intento sin resultado es `WORKER` y se reintenta; sin presupuesto no se repite; los trabajos terminados y sus claves siguen ahí |
 | Extremo a extremo | `tests/e2e/test_restart.py` | **Corte C8, parte F7.7:** con el cliente real esperando, se mata el coordinador a mitad de una tarea y el trabajo termina `SUCCEEDED` |
 
-Estado el 2026-11-16 en el clúster local, todo en verde: 215 unitarias en el
-contenedor (175 en Windows), 21 de integración, 23 de extremo a extremo y 8
-desde el anfitrión.
+Estado el 2026-11-16, todo en verde en el clúster local y en la CI (ejecución
+44005921209): 215 unitarias en el contenedor (175 en Windows), 21 de
+integración, 23 de extremo a extremo y 8 desde el anfitrión.
 
 **Lo que se vio en el corte**, en la traza del trabajo de `test_restart`
 (`docker logs dpes-head`):
