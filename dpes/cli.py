@@ -27,11 +27,17 @@ class RequestFailed(Exception):
     pass
 
 
-class GatewayUnreachable(RequestFailed):
-    """No answer at all: the request may or may not have arrived."""
+class NoAnswer(RequestFailed):
+    """The request may or may not have taken effect: no answer at all, or a
+    503 because the coordinator could not give one (plan/14, D14.5)."""
+
+
+class GatewayUnreachable(NoAnswer):
+    """No answer at all."""
 
 
 SUBMIT_TRIES = 3
+UNANSWERED_GRACE_S = 60  # how long `wait` rides out a coordinator's silence
 
 
 def main(argv=None) -> int:
@@ -57,7 +63,9 @@ def main(argv=None) -> int:
             print(_submit(base, args.job_file))
             return 0
         job_url = f"{base}/jobs/{urllib.parse.quote(args.job_id, safe='')}"
-        view = _call(job_url)
+        # Only `wait` rides out a coordinator that cannot answer (D14.5).
+        read = _poll if args.command == "wait" else _call
+        view = read(job_url)
         if args.command == "status":
             print(json.dumps(view, indent=2))
             return 0
@@ -66,7 +74,7 @@ def main(argv=None) -> int:
             return 0
         while view["state"] not in EXIT_BY_STATE:
             time.sleep(args.interval)
-            view = _call(job_url)
+            view = read(job_url)
         print(json.dumps(view, indent=2))
         return EXIT_BY_STATE[view["state"]]
     except (RequestFailed, OSError) as error:
@@ -93,7 +101,7 @@ def _submit(base, job_file):
         try:
             reply = _request(f"{base}/jobs", body, headers=headers)
             return json.loads(reply)["job_id"]
-        except GatewayUnreachable:
+        except NoAnswer:
             if not tries_left:
                 raise
             time.sleep(1)
@@ -126,6 +134,18 @@ def _call(url, body=None):
     return json.loads(_request(url, body))
 
 
+def _poll(url):
+    """`_call`, asking again while there is no answer, for a while."""
+    deadline = time.monotonic() + UNANSWERED_GRACE_S
+    while True:
+        try:
+            return _call(url)
+        except NoAnswer:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(1)
+
+
 def _request(url, body=None, method=None, headers=None):
     request = urllib.request.Request(url, body, headers or {}, method=method)
     try:
@@ -134,7 +154,9 @@ def _request(url, body=None, method=None, headers=None):
     except urllib.error.HTTPError as error:
         with error:
             detail = _detail(error)
-        raise RequestFailed(f"HTTP {error.code}: {detail}") from None
+        # 503: the coordinator could not answer; the request may have landed.
+        failure = NoAnswer if error.code == 503 else RequestFailed
+        raise failure(f"HTTP {error.code}: {detail}") from None
     except urllib.error.URLError as error:
         raise GatewayUnreachable(
             f"cannot reach the gateway at {url}: {error.reason}"

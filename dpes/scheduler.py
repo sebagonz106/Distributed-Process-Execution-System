@@ -1,7 +1,8 @@
 """Coordinator state machine: events in, attempts to launch out.
 
-Pure module: no Ray, no disk, no clock (plan/02, D02.3); randomness for retry
-waits is injected. Rules: plan/07 (D07.4 to D07.6), plan/08 (D08.4, D08.5) and
+Pure module: no Ray, no disk, no clock (plan/02, D02.3). Retry waits draw from
+a generator seeded with the job id, so the same calls rebuild the same job
+(plan/14, D14.1). Rules: plan/07 (D07.4 to D07.6), plan/08 (D08.4, D08.5) and
 plan/09 (D09.2 to D09.6).
 """
 
@@ -50,10 +51,10 @@ class _Task:
 
 
 class Job:
-    def __init__(self, job_id: str, spec: JobSpec, rand=random.random):
+    def __init__(self, job_id: str, spec: JobSpec, rand=None):
         self.job_id = job_id
         self.spec = spec
-        self._rand = rand
+        self._rand = rand or random.Random(job_id).random
         self._tasks = {name: _Task(task) for name, task in spec.tasks.items()}
         self._dependents = {name: [] for name in spec.tasks}
         for name, task in spec.tasks.items():
@@ -74,6 +75,10 @@ class Job:
         name = self._running.get(execution_id)
         if name and self._tasks[name].state is State.RETRY_WAIT:
             self._tasks[name].state = State.RUNNING
+
+    def unsettled(self) -> list[Attempt]:
+        """Attempts handed out and not settled yet (plan/14, D14.4)."""
+        return [self._attempt(name) for name in self._running.values()]
 
     def on_result(self, result: TaskResult, execution_id: str = "",
                   note: str = "") -> list[Launch]:
@@ -205,6 +210,11 @@ class Job:
             f"{self.job_id}/{name}/{task.round}/{task.attempts}"
         )
         self._running[task.execution_id] = name
+        return self._attempt(name)
+
+    def _attempt(self, name: str) -> Attempt:
+        """The attempt `name` has out now."""
+        task = self._tasks[name]
         inputs = dict(task.spec.inputs)
         for need in task.spec.needs:  # artifacts flow along needs (D11.3)
             inputs.update(self._tasks[need].result.outputs)

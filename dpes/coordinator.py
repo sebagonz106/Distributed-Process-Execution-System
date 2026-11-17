@@ -3,7 +3,9 @@
 The actor is a thin shell around `scheduler.Job`: it turns the launches the
 state machine asks for into Ray tasks, keeps each attempt's deadlines
 (plan/09, D09.4), feeds back what it observed, classified (D09.1), and
-describes all of it in the logs (plan/10).
+describes all of it in the logs (plan/10). Each call it makes to the state
+machine goes to a journal first; when Ray restarts the actor, replaying the
+journal rebuilds it (plan/14).
 """
 
 import asyncio
@@ -15,13 +17,13 @@ import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from dpes.cas import BlobDir
-from dpes.failures import DEADLINE, classify
+from dpes.failures import DEADLINE, RESTARTED, classify
 from dpes.hashing import digest
 from dpes.log import event, setup
 from dpes.messages import ExecutorFailure, TaskResult
-from dpes.scheduler import Job, State
+from dpes.scheduler import Job, Launch, State
 from dpes.spec import SpecError, demand, unschedulable
-from dpes.store import ResultLog
+from dpes.store import Journal, ResultLog
 
 NAMESPACE = "dpes"
 NAME = "coordinator"
@@ -29,10 +31,14 @@ CALL_TIMEOUT_S = 10
 STORE_NAME = "store"
 STORE_ROOT = "/var/lib/dpes/blobs"  # a Docker volume on the control node
 RESULTS_PATH = "/var/lib/dpes/results.sqlite"  # same volume (plan/12)
+JOURNAL_PATH = "/var/lib/dpes/coordinator.sqlite"  # same volume (plan/14)
 STORE_TIMEOUT_S = 60  # a 16 MiB blob crosses the network
 QUEUE_TIMEOUT_S = 3600.0  # launch to start signal (D09.4)
 RUN_MARGIN_S = 5.0  # past the task's own time limit, silence is a failure
 _FINISHED = {State.SUCCEEDED, State.FAILED, State.ERROR}
+# The state machine method that each kind of journal entry calls (plan/14).
+_METHODS = {"running": "running", "result": "on_result",
+            "failure": "on_failure"}
 _log = logging.getLogger(__name__)
 
 
@@ -90,14 +96,17 @@ class _StoreClient:
         return ray.get(reply, timeout=CALL_TIMEOUT_S)
 
 
-@ray.remote(num_cpus=0, max_restarts=0)
+# When its process dies, Ray starts it again and it rebuilds itself from its
+# journal (plan/14, D14.3).
+@ray.remote(num_cpus=0, max_restarts=-1)
 class Coordinator:
     """Async actor: awaiting an attempt yields, so status calls stay served.
 
     `execute` takes an Attempt and returns a TaskResult or an ExecutorFailure.
     """
 
-    def __init__(self, execute, store, queue_timeout_s=QUEUE_TIMEOUT_S):
+    def __init__(self, execute, store, journal_path,
+                 queue_timeout_s=QUEUE_TIMEOUT_S):
         setup()
         self._execute = execute
         self._store = store
@@ -105,11 +114,23 @@ class Coordinator:
         self._me = ray.get_runtime_context().current_actor
         self._jobs = {}
         self._by_key = {}  # idempotency key -> job id (plan/12, D12.7)
-        self._submitted_at = {}  # job id -> monotonic time, until it finishes
+        # job id -> monotonic time, until it finishes; None if recovered
+        self._submitted_at = {}
         self._started = {}  # execution id -> event set by the start signal
         self._in_flight = set()  # asyncio keeps only weak references to tasks
+        self._journal = Journal(journal_path)
+        launched = self._replay()
+        unfinished = [job for job in self._jobs.values()
+                      if job.state not in _FINISHED]
+        self._orphans = [(job, attempt, attempt.execution_id in launched)
+                         for job in unfinished for attempt in job.unsettled()]
+        for job in unfinished:
+            self._submitted_at[job.job_id] = None
         event(_log, logging.INFO, "coordinator started",
-              queue_timeout_s=queue_timeout_s)
+              queue_timeout_s=queue_timeout_s, jobs=len(self._jobs),
+              unfinished=len(unfinished))
+        if unfinished:
+            self._me.recover.remote()  # runs once this constructor returns
 
     async def submit(self, spec, key=None) -> str:
         """Start `spec` as a new job, unless `key` already started it."""
@@ -124,16 +145,29 @@ class Coordinator:
             event(_log, logging.INFO, "job resubmitted", job=known.job_id,
                   key=key)
             return known.job_id
-        job = Job(uuid.uuid4().hex, spec)
+        job_id = uuid.uuid4().hex
+        self._journal.append(job_id, "accepted", spec, key)  # before replying
+        job = self._jobs[job_id] = Job(job_id, spec)
         if key:
-            self._by_key[key] = job.job_id
-        self._jobs[job.job_id] = job
-        self._submitted_at[job.job_id] = time.monotonic()
+            self._by_key[key] = job_id
+        self._submitted_at[job_id] = time.monotonic()
         launches = job.start()
-        event(_log, logging.INFO, "job started", job=job.job_id,
+        event(_log, logging.INFO, "job started", job=job_id,
               tasks=len(spec.tasks), ready=len(launches))
         self._launch(job, launches)
-        return job.job_id
+        return job_id
+
+    async def recover(self):
+        """Settle or relaunch what the previous instance left in flight
+        (plan/14, D14.4)."""
+        orphans, self._orphans = self._orphans, []
+        for job, attempt, launched in orphans:
+            event(_log, logging.WARNING, "attempt orphaned by a restart",
+                  execution=attempt.execution_id, launched=launched)
+            if launched:  # it may have run: reconcile, else a WORKER failure
+                self._spawn(self._settle(job, attempt, RESTARTED))
+            else:
+                self._launch(job, [Launch(attempt)])
 
     async def status(self, job_id: str):
         job = self._jobs.get(job_id)
@@ -146,20 +180,45 @@ class Coordinator:
                   execution=execution_id)
             event_.set()
 
+    def _replay(self):
+        """Rebuild every job from the journal (plan/14, D14.1); return the
+        execution ids that were launched."""
+        launched = set()
+        for job_id, kind, args in self._journal.events():
+            if kind == "accepted":
+                spec, key = args
+                self._jobs[job_id] = Job(job_id, spec)
+                self._jobs[job_id].start()
+                if key:
+                    self._by_key[key] = job_id
+                continue
+            if kind == "running":
+                launched.add(args[0])
+            getattr(self._jobs[job_id], _METHODS[kind])(*args)
+        return launched
+
+    def _apply(self, job, kind, *args):
+        """Journal a call to the state machine, then make it: whatever the
+        outside sees follows from the journal (plan/14, D14.2)."""
+        self._journal.append(job.job_id, kind, *args)
+        return getattr(job, _METHODS[kind])(*args)
+
     def _launch(self, job, launches):
         for launch in launches:
-            watcher = asyncio.create_task(self._run(job, launch))
-            self._in_flight.add(watcher)
-            watcher.add_done_callback(self._in_flight.discard)
+            self._spawn(self._run(job, launch))
+
+    def _spawn(self, coroutine):
+        task = asyncio.create_task(coroutine)
+        self._in_flight.add(task)
+        task.add_done_callback(self._in_flight.discard)
 
     async def _run(self, job, launch):
         # Every path ends in an event: an exception lost in this background
         # task would leave the job RUNNING forever.
         attempt = launch.attempt
-        eid = attempt.execution_id
         if launch.delay_s:
             await asyncio.sleep(launch.delay_s)
-        job.running(eid)
+        self._apply(job, "running", attempt.execution_id)
         try:
             outcome = await self._outcome(job, attempt)
         except _Silent:
@@ -171,7 +230,12 @@ class Coordinator:
                 observed = outcome
             else:  # the executor broke its contract
                 observed = f"executor returned {type(outcome).__name__}"
+        await self._settle(job, attempt, observed)
 
+    async def _settle(self, job, attempt, observed):
+        """Give the state machine what was observed of `attempt`, then
+        launch what that unblocks."""
+        eid = attempt.execution_id
         note = ""
         if not isinstance(observed, TaskResult):
             # The task may have ended and been saved, with only its answer
@@ -186,18 +250,18 @@ class Coordinator:
 
         if isinstance(observed, TaskResult) and observed.succeeded:
             event(_log, logging.INFO, "attempt succeeded", execution=eid)
-            unblocked = job.on_result(observed, eid, note)
+            unblocked = self._apply(job, "result", observed, eid, note)
         elif isinstance(observed, TaskResult):
             event(_log, logging.WARNING, "attempt failed", execution=eid,
                   failure_class=classify(observed).value,
                   exit_code=observed.exit_code, timed_out=observed.timed_out)
-            unblocked = job.on_result(observed, eid, note)
+            unblocked = self._apply(job, "result", observed, eid, note)
         else:
             failure_class = classify(observed)
             reason = _describe(observed)
             event(_log, logging.WARNING, "attempt failed", execution=eid,
                   failure_class=failure_class.value, reason=reason)
-            unblocked = job.on_failure(eid, failure_class, reason)
+            unblocked = self._apply(job, "failure", eid, failure_class, reason)
 
         for retry in (l for l in unblocked if l.attempt.task == attempt.task):
             event(_log, logging.WARNING, "retry scheduled",
@@ -262,14 +326,16 @@ class Coordinator:
         state = job.state
         if state not in _FINISHED or job.job_id not in self._submitted_at:
             return
-        took = time.monotonic() - self._submitted_at.pop(job.job_id)
+        started = self._submitted_at.pop(job.job_id)
+        took = {} if started is None else {  # None: recovered (plan/14)
+            "duration_s": round(time.monotonic() - started, 3)}
         counts = {}
         for task in job.view()["tasks"].values():
             counts[task["state"].lower()] = counts.get(
                 task["state"].lower(), 0) + 1
         level = logging.INFO if state is State.SUCCEEDED else logging.ERROR
         event(_log, level, "job finished", job=job.job_id, state=state.value,
-              duration_s=round(took, 3), **counts)
+              **took, **counts)
 
 
 class _Silent(Exception):
@@ -357,5 +423,5 @@ def connect() -> _Client:
         lifetime="detached",  # survives a gateway restart
         get_if_exists=True,
         scheduling_strategy=here,
-    ).remote(execute, store)
+    ).remote(execute, store, JOURNAL_PATH)
     return _Client(actor, store)

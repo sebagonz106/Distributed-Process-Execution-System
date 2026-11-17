@@ -2,10 +2,22 @@ import os
 import tempfile
 import unittest
 
+from dpes.failures import FailureClass
 from dpes.messages import ResultKey, TaskResult
-from dpes.store import ResultLog
+from dpes.spec import parse_job
+from dpes.store import Journal, ResultLog
 
 KEY = ResultKey("job-1", "compile", 0)
+SPEC = parse_job({"tasks": {
+    "compile": {
+        "command": ["cc", "-c", "main.c"], "env": {"CC": "gcc"},
+        "timeout_s": 90, "resources": {"cpu": 2, "memory_mb": 256, "gpu": 1},
+        "retries": {"worker": 1}, "inputs": {"main.c": "sha256:" + "b" * 64},
+        "outputs": ["main.o"],
+    },
+    "link": {"command": ["cc", "main.o"], "needs": ["compile"],
+             "outputs": ["app"]},
+}})
 
 
 def result(execution_id, exit_code=0):
@@ -114,6 +126,53 @@ class ResultLogTest(unittest.TestCase):
         b = other.save(KEY, result("job-1/compile/0/2", exit_code=1))
 
         self.assertEqual(a, b)
+
+
+class JournalTest(unittest.TestCase):
+    """The coordinator's calls come back as they went in (plan/14, D14.1)."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.path = os.path.join(directory.name, "coordinator.sqlite")
+        self.journal = self.open()
+
+    def open(self):
+        journal = Journal(self.path)
+        self.addCleanup(journal.close)
+        return journal
+
+    def test_each_kind_of_call_comes_back_as_it_went_in(self):
+        calls = [
+            ("job-1", "accepted", (SPEC, "key-1")),
+            ("job-1", "running", ("job-1/compile/0/1",)),
+            ("job-1", "result",
+             (result("job-1/compile/0/1"), "job-1/compile/0/1", "a note")),
+            ("job-1", "failure",
+             ("job-1/link/0/1", FailureClass.WORKER, "coordinator restart")),
+        ]
+        for job_id, kind, args in calls:
+            self.journal.append(job_id, kind, *args)
+
+        self.assertEqual(calls, list(self.journal.events()))
+
+    def test_a_job_sent_without_a_key_keeps_none(self):
+        self.journal.append("job-1", "accepted", SPEC, None)
+
+        ((_, _, (_, key)),) = self.journal.events()
+
+        self.assertIsNone(key)
+
+    def test_calls_keep_their_order_across_jobs_and_reopening(self):
+        for job_id, eid in (("job-1", "a"), ("job-2", "b"), ("job-1", "c")):
+            self.journal.append(job_id, "running", eid)
+        self.journal.close()
+
+        self.assertEqual(
+            [("job-1", "running", ("a",)), ("job-2", "running", ("b",)),
+             ("job-1", "running", ("c",))],
+            list(self.open().events()),
+        )
 
 
 if __name__ == "__main__":

@@ -378,6 +378,51 @@ class RetryTest(unittest.TestCase):
         self.assertEqual(["b"], names(unblocked))
 
 
+class RecoveryTest(unittest.TestCase):
+    """What a restarted coordinator needs from the state machine (plan/14)."""
+
+    def test_unsettled_lists_what_was_handed_out_and_not_settled(self):
+        tasks = {"a": task_spec(), "b": task_spec(needs=["a"])}
+        job = Job("job-1", JobSpec(tasks))
+        first = only(job.start()).attempt
+        self.assertEqual([first], job.unsettled())
+
+        second = only(job.on_result(result(first.execution_id))).attempt
+        self.assertEqual([second], job.unsettled())
+
+        job.on_result(result(second.execution_id))
+        self.assertEqual([], job.unsettled())
+
+    def test_a_waiting_retry_is_unsettled_under_its_new_identity(self):
+        job = make_job(retries={**NO_RETRIES, "network": 1})
+        eid = only(job.start()).attempt.execution_id
+
+        retry = only(job.on_failure(eid, NETWORK, "deadline")).attempt
+
+        self.assertEqual([retry], job.unsettled())
+
+    def test_the_same_calls_rebuild_the_same_job_waits_included(self):
+        spec = JobSpec({"hello": task_spec(retries={**NO_RETRIES,
+                                                    "network": 2})})
+
+        def play():
+            # No rand given: a job draws its waits from its own id (D14.1).
+            job = Job("job-1", spec)
+            eid = only(job.start()).attempt.execution_id
+            for _ in range(2):
+                retry = only(job.on_failure(eid, NETWORK, "deadline"))
+                eid = retry.attempt.execution_id
+                job.running(eid)
+            job.on_result(result(eid))
+            return job.view()
+
+        first = play()
+
+        self.assertEqual(first, play())
+        waits = [a["retry_in_s"] for a in first["tasks"]["hello"]["attempts"]]
+        self.assertNotEqual(waits[0], waits[1])
+
+
 class ArtifactFlowTest(unittest.TestCase):
     def test_a_task_receives_its_inputs_and_its_dependencies_outputs(self):
         tasks = {

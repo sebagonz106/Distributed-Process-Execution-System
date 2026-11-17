@@ -16,6 +16,9 @@ class FailureClass(str, Enum):
 
 
 DEADLINE = "deadline"  # the coordinator's own per-attempt deadline expired
+# The coordinator died with the attempt in flight, and Ray stops the tasks of
+# an owner that dies (plan/14, D14.4).
+RESTARTED = "coordinator restart"
 
 # Retries allowed per class unless a task declares its own (D09.2).
 DEFAULT_RETRIES = {"task": 0, "worker": 3, "network": 4}
@@ -26,7 +29,7 @@ _CAP_S = 30.0
 
 def classify(observed) -> FailureClass:
     """`observed` is a TaskResult that is not a success, an ExecutorFailure,
-    DEADLINE, or the name of the exception Ray raised."""
+    DEADLINE, RESTARTED, or the name of the exception Ray raised."""
     if isinstance(observed, TaskResult):
         return FailureClass.TASK
     if isinstance(observed, ExecutorFailure):
@@ -35,7 +38,7 @@ def classify(observed) -> FailureClass:
         return FailureClass.NETWORK
     if observed == DEADLINE:
         return FailureClass.NETWORK
-    # Any exception from Ray means no result: the worker's side failed.
+    # A Ray exception or RESTARTED: the process running the attempt died.
     return FailureClass.WORKER
 
 

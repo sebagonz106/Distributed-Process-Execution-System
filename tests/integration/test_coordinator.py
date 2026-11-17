@@ -12,9 +12,11 @@ import time
 import unittest
 
 import ray
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from dpes.coordinator import BlobStore, Coordinator, _Client
 from dpes.hashing import digest
+from dpes.messages import ResultKey
 from dpes.spec import SpecError, parse_job
 
 
@@ -34,6 +36,12 @@ def stand_in_executor(attempt, store):
         time.sleep(15)
     if program == "garbage":
         return "not a result"
+    if program == "save-then-hang" and number == 1:
+        # The task ends and is saved; then its coordinator dies (plan/14).
+        saved = TaskResult(attempt.execution_id, 0, False, {},
+                           output_tail="saved\n")
+        store.save_result(attempt.result_key, saved)
+        time.sleep(15)
     if program == "lose-ack" and number == 1:
         # The task ends and is saved, but its answer never arrives.
         saved = TaskResult(attempt.execution_id, 0, False, {},
@@ -61,10 +69,19 @@ class CoordinatorTestCase(unittest.TestCase):
         ray.init(address="auto", logging_level="ERROR",
                  ignore_reinit_error=True, log_to_driver=False)
         folder = tempfile.mkdtemp(prefix="dpes-store-")
-        cls.store = BlobStore.remote(os.path.join(folder, "blobs"),
-                                     os.path.join(folder, "results.sqlite"))
-        cls.coordinator = Coordinator.remote(
-            stand_in_executor, cls.store, queue_timeout_s=cls.queue_timeout_s
+        # On this node, as on the control node: the folder is only here, and
+        # a restarted coordinator must find its journal again (plan/14).
+        here = NodeAffinitySchedulingStrategy(
+            ray.get_runtime_context().get_node_id(), soft=False
+        )
+        cls.store = BlobStore.options(scheduling_strategy=here).remote(
+            os.path.join(folder, "blobs"),
+            os.path.join(folder, "results.sqlite"),
+        )
+        cls.coordinator = Coordinator.options(scheduling_strategy=here).remote(
+            stand_in_executor, cls.store,
+            os.path.join(folder, "coordinator.sqlite"),
+            queue_timeout_s=cls.queue_timeout_s,
         )
 
     @classmethod
@@ -253,6 +270,90 @@ class QueueDeadlineTest(CoordinatorTestCase):
         self.assertEqual("ERROR", view["state"])
         self.assertEqual(("NETWORK", "deadline"),
                          (task["failure_class"], task["error"]))
+
+
+class RecoveryTest(CoordinatorTestCase):
+    """plan/14: the coordinator's process is killed and Ray starts it again.
+
+    Each test proves the restart happened: a job that was in flight shows it
+    in its history.
+    """
+
+    def poll(self, job_id, done, timeout_s=60):
+        """The first view of the job for which `done` holds."""
+        deadline = time.monotonic() + timeout_s
+        while True:
+            try:
+                view = self.status(job_id)
+                if done(view):
+                    return view
+            except ray.exceptions.RayActorError:
+                pass  # this call reached the coordinator as it died
+            self.assertLess(time.monotonic(), deadline, "it never happened")
+            time.sleep(0.2)
+
+    def finished(self, job_id):
+        return self.poll(job_id, lambda v: v["state"] not in ("PENDING",
+                                                              "RUNNING"))
+
+    def kill(self):
+        ray.kill(self.coordinator, no_restart=False)
+
+    def kill_while_running(self, spec):
+        job_id = self.submit(spec)
+        self.poll(job_id, lambda v: v["tasks"]["t"]["state"] == "RUNNING")
+        time.sleep(1)  # its launch is journaled and the attempt is out
+        self.kill()
+        return job_id
+
+    def test_an_attempt_lost_in_a_restart_is_retried_as_a_worker_failure(self):
+        job_id = self.kill_while_running(job(t={"command": ["hang-once"]}))
+
+        task = self.finished(job_id)["tasks"]["t"]
+
+        lost, retried = task["attempts"]
+        self.assertEqual(("WORKER", "coordinator restart"),
+                         (lost["outcome"], lost["reason"]))
+        self.assertEqual(("SUCCEEDED", "SUCCEEDED"),
+                         (retried["outcome"], task["state"]))
+
+    def test_without_a_budget_a_lost_attempt_is_not_run_again(self):
+        spec = job(t={"command": ["hang-once"], "retries": {"worker": 0}})
+
+        view = self.finished(self.kill_while_running(spec))
+
+        (lost,) = view["tasks"]["t"]["attempts"]
+        self.assertEqual(("ERROR", "coordinator restart"),
+                         (view["state"], lost["reason"]))
+
+    def test_a_result_saved_before_the_restart_is_adopted(self):
+        job_id = self.submit(job(t={"command": ["save-then-hang"]}))
+        key = ResultKey(job_id, "t", 0)
+        self.poll(job_id, lambda _: ray.get(self.store.result.remote(key)))
+        self.kill()
+
+        task = self.finished(job_id)["tasks"]["t"]
+
+        (attempt,) = task["attempts"]  # the command did not run again
+        self.assertEqual(
+            ("SUCCEEDED", "adopted by reconciliation after coordinator "
+                          "restart", "saved\n"),
+            (attempt["outcome"], attempt["reason"], task["output"]),
+        )
+
+    def test_finished_jobs_and_their_keys_survive_a_restart(self):
+        spec = job(t={"command": ["0"]})
+        done = ray.get(self.coordinator.submit.remote(spec, "kept-key"))
+        before = self.finished(done)
+
+        proof = self.finished(
+            self.kill_while_running(job(t={"command": ["hang-once"]})))
+
+        self.assertEqual("coordinator restart",
+                         proof["tasks"]["t"]["attempts"][0]["reason"])
+        self.assertEqual(before, self.status(done))
+        self.assertEqual(
+            done, ray.get(self.coordinator.submit.remote(spec, "kept-key")))
 
 
 if __name__ == "__main__":

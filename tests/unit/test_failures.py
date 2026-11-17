@@ -2,6 +2,7 @@ import unittest
 
 from dpes.failures import (
     DEADLINE,
+    RESTARTED,
     FailureClass,
     classify,
     retry_delay,
@@ -35,6 +36,10 @@ class ClassifyTest(unittest.TestCase):
         for name in ("WorkerCrashedError", "NodeDiedError", "RayTaskError"):
             with self.subTest(name=name):
                 self.assertEqual(WORKER, classify(name))
+
+    def test_a_coordinator_restart_is_the_worker_failing(self):
+        # Ray stops the attempts of an owner that died (plan/14, D14.4).
+        self.assertEqual(WORKER, classify(RESTARTED))
 
 
 class RetryDelayTest(unittest.TestCase):

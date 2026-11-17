@@ -224,16 +224,28 @@ class IdempotencyKeyTest(ServerTestCase):
 
     def test_the_client_sends_a_key_and_retries_with_the_same_one(self):
         job_file = CliTest.write_job(self, HELLO_JOB)
-        answers = [cli.GatewayUnreachable("refused"), b'{"job_id": "job-1"}']
-        with mock.patch.object(cli, "_request", side_effect=answers) as sent:
-            with mock.patch.object(cli.time, "sleep"):
-                code = cli.main(["--url", self.url, "submit", job_file])
+        # A 503 is as ambiguous as silence: the job may exist (plan/14, D14.5).
+        for silence in (cli.GatewayUnreachable("refused"),
+                        cli.NoAnswer("HTTP 503: coordinator unavailable")):
+            with self.subTest(silence=silence):
+                answers = [silence, b'{"job_id": "job-1"}']
+                with mock.patch.object(cli, "_request",
+                                       side_effect=answers) as sent:
+                    with mock.patch.object(cli.time, "sleep"):
+                        code = cli.main(["--url", self.url, "submit",
+                                         job_file])
 
-        keys = [call.kwargs["headers"]["Idempotency-Key"]
-                for call in sent.call_args_list]
-        self.assertEqual(0, code)
-        self.assertEqual(2, len(keys))
-        self.assertEqual(keys[0], keys[1])
+                keys = [call.kwargs["headers"]["Idempotency-Key"]
+                        for call in sent.call_args_list]
+                self.assertEqual(0, code)
+                self.assertEqual(2, len(keys))
+                self.assertEqual(keys[0], keys[1])
+
+    def test_a_503_from_the_gateway_is_no_answer(self):
+        self.coordinator.broken = True
+
+        with self.assertRaises(cli.NoAnswer):
+            cli._request(self.url + "/jobs/job-1")
 
     def test_the_client_gives_up_after_three_tries(self):
         job_file = CliTest.write_job(self, HELLO_JOB)
@@ -348,6 +360,35 @@ class CliTest(ServerTestCase):
 
                 self.assertEqual(expected, code)
                 self.assertEqual(final, json.loads(out)["state"])
+
+    def test_wait_rides_out_a_coordinator_that_cannot_answer(self):
+        # A restarting coordinator answers 503 for a moment (plan/14, D14.5).
+        silent = cli.NoAnswer("HTTP 503: coordinator unavailable")
+        answers = [json.dumps(view(state)).encode()
+                   for state in ("RUNNING", "SUCCEEDED")]
+        answers[1:1] = [silent, silent]
+        with mock.patch.object(cli, "_request", side_effect=answers):
+            with mock.patch.object(cli.time, "sleep"):
+                code, out, _ = self.run_cli("wait", "job-1", "--interval", "0")
+
+        self.assertEqual((0, "SUCCEEDED"), (code, json.loads(out)["state"]))
+
+    def test_wait_gives_up_on_a_coordinator_that_stays_silent(self):
+        silent = cli.NoAnswer("HTTP 503: coordinator unavailable")
+        with mock.patch.object(cli, "_request", side_effect=silent):
+            with mock.patch.object(cli, "UNANSWERED_GRACE_S", 0):
+                code, _, err = self.run_cli("wait", "job-1")
+
+        self.assertEqual(cli.EXIT_REQUEST_FAILED, code)
+        self.assertIn("503", err)
+
+    def test_status_reports_an_unavailable_coordinator_at_once(self):
+        self.coordinator.broken = True
+
+        code, _, err = self.run_cli("status", "job-1")
+
+        self.assertEqual(cli.EXIT_REQUEST_FAILED, code)
+        self.assertIn("503", err)
 
     def test_an_unknown_job_is_a_failed_request(self):
         code, _, err = self.run_cli("status", "nope")
