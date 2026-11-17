@@ -21,7 +21,7 @@
 | ✅ | 5 · Fallos | Un guion por clase de fallo, con su reintento | R6 R8 | A | 15 nov |
 | ✅ | 6 · Confirmación | El trabajador muere tras guardar: una sola ejecución | R7 | A | 16 nov |
 | ⬜ | 7 · Caché | Reenviar no ejecuta nada; cambiar un fichero recompila solo ese | R9 | B | 28 nov |
-| ⬜ | 8 · Entrega | Demo desde un clon limpio, imagen publicada | — | A y B | 30 nov |
+| 🟡 | 8 · Entrega | Demo desde un clon limpio, imagen publicada, coordinador que sobrevive a su reinicio | — | A y B | 30 nov |
 
 ## Requisitos
 
@@ -42,8 +42,12 @@
 Las dos de B pueden empezar ya. La Fase 6 tocó dos piezas de su pista, el
 ejecutor y el actor del almacén ([plan/12](plan/12-fase-6-confirmacion-perdida.md));
 la 7 usará los resultados confirmados que guarda ahora el almacén.
-Pruebas hoy: 204 unitarias, 17 de integración, 22 de extremo a extremo y 8
-desde el anfitrión, en verde.
+
+De la 8, la parte A va adelantada: el coordinador ya sobrevive a su reinicio
+(F7.7, [plan/14](plan/14-fase-8-recuperacion-del-coordinador.md)). Le queda la
+comparación arquitectónica.
+Pruebas hoy: 215 unitarias, 21 de integración, 23 de extremo a extremo y 8
+desde el anfitrión, en verde en el clúster local.
 
 Los contratos de `dpes/messages.py` quedaron congelados al cerrar la Fase 1
 sin que B los revisara; cambiarlos ahora requiere una decisión escrita

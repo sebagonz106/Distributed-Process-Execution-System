@@ -168,6 +168,11 @@ decisión aprobada requiere una decisión nueva que la sustituya.
   del estado al 2026-11-16 (commit `dd605e8`): requisitos con su evidencia,
   arquitectura construida, garantías, verificación, desviaciones, límites y lo
   que falta.
+- [plan/14-fase-8-recuperacion-del-coordinador.md](plan/14-fase-8-recuperacion-del-coordinador.md):
+  Fase 8, parte A (F7.7). El coordinador escribe en un diario SQLite cada
+  llamada a su máquina de estados antes de hacerla; Ray lo reinicia y el
+  constructor repite el diario. Los intentos que quedaron en vuelo se
+  reconcilian o cuentan como `WORKER`.
 
 Al empezar una fase se crea su documento con el siguiente número libre (D04.5).
 
@@ -234,6 +239,13 @@ CI ([plan/12](plan/12-fase-6-confirmacion-perdida.md)): `store.py`, punto de
 confirmación en el ejecutor, reconciliación en el coordinador, fallo inyectable
 `lose-ack` y `Idempotency-Key`. R7 cumplido. Pendientes de B: Fases 4 y 7;
 después, la 8 (de los dos).
+
+Fase 8 en curso. La persona A hizo F7.7 el 2026-11-16
+([plan/14](plan/14-fase-8-recuperacion-del-coordinador.md)): diario
+`/var/lib/dpes/coordinator.sqlite`, `max_restarts=-1`, `recover()` y un
+cliente que atraviesa el 503 de un reinicio; el corte es
+`tests/e2e/test_restart.py`. A le queda la comparación arquitectónica (T5); la
+publicación de la imagen (T3), la guía y la demostración son de B.
 
 Uso desde Windows con el clúster levantado:
 `py -m dpes.cli submit examples/hola/job.json`, `py -m dpes.cli wait <id>`,

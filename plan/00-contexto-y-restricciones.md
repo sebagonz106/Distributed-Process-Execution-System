@@ -41,7 +41,7 @@ identificador y debe quedar enlazada al paso que la resuelve y a sus pruebas.
 | R4 | Transferencia de entradas y artefactos | 3 | cumplido (C3, 2026-11-15) |
 | R5 | Registro y transmisión de logs | 1, 4 | planificado |
 | R6 | Clasificación de fallos de tarea, trabajador y red | 5 | cumplido (C5, 2026-11-15) |
-| R7 | Tratamiento del caso «la tarea terminó, pero se perdió la confirmación» | 6 | cumplido (C6, 2026-11-16) |
+| R7 | Tratamiento del caso «la tarea terminó, pero se perdió la confirmación» | 6, 8 | cumplido (C6, 2026-11-16); el coordinador sobrevive a su reinicio (F7.7, plan/14) |
 | R8 | Políticas de reintento según el tipo de fallo | 5 | cumplido (C5, 2026-11-15) |
 | R9 | Caché basada en contenido para evitar trabajo idéntico cuando las entradas no cambian | 7 | planificado |
 

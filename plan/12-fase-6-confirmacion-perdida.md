@@ -128,6 +128,9 @@ pone en esta fase; se avisa a la persona B.
   distinto se avisa, porque devolver el anterior ocultaría el error.
 - **Límite:** las claves viven en la memoria del coordinador, como sus
   trabajos (D07.8). Se perderían si el coordinador se reiniciara (F7.7, Fase 8).
+  **Resuelto por D14.1:** las claves van en el diario del coordinador y
+  sobreviven a su reinicio
+  ([plan/14](14-fase-8-recuperacion-del-coordinador.md)).
 
 ### D12.8 — Qué se garantiza
 

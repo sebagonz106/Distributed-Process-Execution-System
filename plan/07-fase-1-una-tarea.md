@@ -143,6 +143,11 @@ propia, como en la Fase 0.
 
 ### D07.8 — El estado del coordinador vive en memoria hasta la Fase 8
 
+> **Resuelta en la Fase 8 por D14.1**
+> ([14-fase-8-recuperacion-del-coordinador.md](14-fase-8-recuperacion-del-coordinador.md)):
+> el estado es un diario en SQLite que se repite al arrancar. Se conserva como
+> registro.
+
 - **Contexto:** D02.4 decide que el estado sea durable en SQLite, y el
   calendario (D04) ponía «estado en disco» en esta fase.
 - **Decisión:** en la Fase 1 el estado del coordinador vive en la memoria del
