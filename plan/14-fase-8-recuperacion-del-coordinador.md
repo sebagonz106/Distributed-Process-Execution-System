@@ -201,3 +201,15 @@ desde el anfitrión.
   ([ray-project/ray#53727](https://github.com/ray-project/ray/issues/53727)).
   El aviso sale en la prueba de integración, donde el ejecutor sustituto viaja
   por valor; el coordinador que crea la pasarela no lo da.
+
+**La primera pasada por la CI falló** (ejecución 44001340673), pero no en
+F7.7. Falló la prueba del plazo de la Fase 5: tardó 15,56 s y su límite era
+15 s. Es la última de la suite, y a esas alturas sus intentos tardan más en
+arrancar. En local tarda entre 12 y 16 s, frente a 7,3 s cuando corre sola o
+detrás de una única clase. Ray tenía libres las 4 CPU, así que lo lento era
+arrancar procesos.
+
+La prueba medía a la vez dos cosas: que el plazo corta la espera, y lo que
+tarda Ray en arrancar dos procesos. Ahora el intento colgado dura 60 s y el
+límite es 30 s. Si el plazo no actuara, la prueba tardaría 60 s, y un arranque
+lento ya no basta para hacerla fallar.

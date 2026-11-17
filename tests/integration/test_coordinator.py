@@ -32,8 +32,10 @@ def stand_in_executor(attempt, store):
     number = int(attempt.execution_id.rsplit("/", 1)[1])
     if program == "die" or (program == "die-once" and number == 1):
         os._exit(1)
-    if program == "sleep" or (program == "hang-once" and number == 1):
+    if program == "sleep":
         time.sleep(15)
+    if program == "hang-once" and number == 1:
+        time.sleep(60)  # far past any deadline a test waits for
     if program == "garbage":
         return "not a result"
     if program == "save-then-hang" and number == 1:
@@ -220,7 +222,9 @@ class RetryTest(CoordinatorTestCase):
         self.assertEqual(("NETWORK", "deadline"),
                          (attempts[0]["outcome"], attempts[0]["reason"]))
         self.assertGreater(attempts[0]["retry_in_s"], 0)
-        self.assertLess(time.monotonic() - started, 15, "deadline too late")
+        # Well short of the 60 s hang, with room for the slow worker
+        # start-ups of a cluster that ran the whole suite (plan/14).
+        self.assertLess(time.monotonic() - started, 30, "deadline too late")
 
 
 class LostConfirmationTest(CoordinatorTestCase):
