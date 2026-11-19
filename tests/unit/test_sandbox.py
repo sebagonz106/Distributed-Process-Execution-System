@@ -101,6 +101,17 @@ class SandboxTest(WorkspaceTestCase):
         self.assertEqual(127, outcome.exit_code)
         self.assertIn("no-such-program", outcome.output)
 
+    def test_the_output_can_go_to_a_file_the_caller_keeps(self):
+        # What the executor needs to follow it while the command runs (D15.3).
+        with tempfile.TemporaryFile() as sink:
+            outcome = sandbox.run(("sh", "-c", "echo hi"), {}, 5,
+                                  self.workspace, sink=sink)
+
+            sink.seek(0)
+            self.assertEqual(b"hi\n", sink.read())
+            self.assertFalse(sink.closed)  # left open: the caller owns it
+            self.assertEqual("hi\n", outcome.output)
+
 
 @unittest.skipUnless(os.geteuid() == 0, "dropping privileges needs root")
 class UnprivilegedTest(WorkspaceTestCase):

@@ -46,11 +46,11 @@ _log = logging.getLogger(__name__)
 
 
 @ray.remote(num_cpus=0)  # the real resources are set per launch
-def _attempt(execute, attempt, coordinator, store):
+def _attempt(execute, attempt, coordinator, store, logs):
     """One attempt as a Ray task: say it started, then run it."""
     setup()  # this worker process logs like every other (D10.7)
     coordinator.started.remote(attempt.execution_id)
-    return execute(attempt, _StoreClient(store))
+    return execute(attempt, _StoreClient(store, logs))
 
 
 @ray.remote(num_cpus=0, max_restarts=0)
@@ -103,6 +103,10 @@ class LogStore:
         """(seq, data) pieces covering bytes [offset, offset+limit)."""
         return self._logs.read(execution_id, offset, limit)
 
+    def close_fragments(self, execution_id):
+        """Say the attempt wrote its last fragment (D15.14)."""
+        return self._logs.close(execution_id)
+
     async def tail_fragments(self, execution_id, offset, poll_s=POLL_S,
                              idle_s=IDLE_S):
         """(seq, data) as they arrive, for a client following the log."""
@@ -112,10 +116,12 @@ class LogStore:
 
 
 class _StoreClient:
-    """What the executor gets: the store's get and put, as plain calls."""
+    """What the executor gets: the blob store and the log store, as plain
+    calls. It is the only thing that knows where they are (D15.5)."""
 
-    def __init__(self, actor):
+    def __init__(self, actor, logs):
         self._actor = actor
+        self._logs = logs
 
     def get(self, name):
         return ray.get(self._actor.get.remote(name), timeout=STORE_TIMEOUT_S)
@@ -128,6 +134,14 @@ class _StoreClient:
         reply = self._actor.save_result.remote(key, result)
         return ray.get(reply, timeout=CALL_TIMEOUT_S)
 
+    def append_fragment(self, execution_id, seq, data):
+        reply = self._logs.append_fragment.remote(execution_id, seq, data)
+        return ray.get(reply, timeout=CALL_TIMEOUT_S)
+
+    def close_fragments(self, execution_id):
+        reply = self._logs.close_fragments.remote(execution_id)
+        return ray.get(reply, timeout=CALL_TIMEOUT_S)
+
 
 # When its process dies, Ray starts it again and it rebuilds itself from its
 # journal (plan/14, D14.3).
@@ -138,11 +152,12 @@ class Coordinator:
     `execute` takes an Attempt and returns a TaskResult or an ExecutorFailure.
     """
 
-    def __init__(self, execute, store, journal_path,
+    def __init__(self, execute, store, logs, journal_path,
                  queue_timeout_s=QUEUE_TIMEOUT_S):
         setup()
         self._execute = execute
         self._store = store
+        self._logs = logs
         self._queue_timeout_s = queue_timeout_s
         self._me = ray.get_runtime_context().current_actor
         self._jobs = {}
@@ -323,7 +338,7 @@ class Coordinator:
         started = self._started[eid] = asyncio.Event()
         task = job.spec.tasks[attempt.task]
         ref = _attempt.options(max_retries=0, **_placement(task)).remote(
-            self._execute, attempt, self._me, self._store
+            self._execute, attempt, self._me, self._store, self._logs
         )
         event(_log, logging.INFO, "attempt launched", execution=eid,
               resources=_compact(task.resources))
@@ -473,5 +488,5 @@ def connect() -> _Client:
         lifetime="detached",  # survives a gateway restart
         get_if_exists=True,
         scheduling_strategy=here,
-    ).remote(execute, store, JOURNAL_PATH)
+    ).remote(execute, store, logs, JOURNAL_PATH)
     return _Client(actor, store, logs)

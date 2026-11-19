@@ -214,6 +214,52 @@ class LogDirTest(unittest.TestCase):
         self.assertEqual([(1, b"one\n"), (2, b"two\n")],
                          self.reopen().read(EID, 0))
 
+    def test_a_log_ends_when_it_is_closed(self):
+        self.logs.append(EID, 1, b"one\n")
+
+        self.assertFalse(self.logs.finished(EID))
+        self.assertTrue(self.logs.close(EID))
+        self.assertTrue(self.logs.finished(EID))
+
+    def test_closing_twice_says_it_was_already_closed(self):
+        self.assertTrue(self.logs.close(EID))
+
+        self.assertFalse(self.logs.close(EID))
+
+    def test_a_closed_log_still_serves_its_output(self):
+        self.logs.append(EID, 1, b"one\n")
+        self.logs.close(EID)
+
+        self.assertEqual([(1, b"one\n")], self.reopen().read(EID, 0))
+
+    def test_no_fragment_is_taken_after_the_end(self):
+        self.logs.close(EID)
+
+        with self.assertRaises(ValueError):
+            self.logs.append(EID, 1, b"late\n")
+
+    def test_the_end_survives_reopening(self):
+        self.logs.append(EID, 1, b"one\n")
+        self.logs.close(EID)
+
+        self.assertTrue(self.reopen().finished(EID))
+
+    def test_a_log_closed_without_output_keeps_its_header(self):
+        self.assertTrue(self.logs.close(EID))
+
+        self.assertEqual([], self.reopen().read(EID, 0))
+        self.assertTrue(self.reopen().finished(EID))
+
+    def test_an_end_marker_cut_short_does_not_count(self):
+        self.logs.append(EID, 1, b"one\n")
+        with open(self.path(EID), "ab") as f:
+            f.write(struct.pack("<QI", 0, 0)[:5])  # as a crash leaves it
+
+        logs = self.reopen()
+
+        self.assertFalse(logs.finished(EID))
+        self.assertEqual([(1, b"one\n")], logs.read(EID, 0))
+
     def short_open(self, path, mode="r", *args, **kwargs):
         """`open`, but writes into the file stop one byte short."""
         real = io.open(path, mode, *args, **kwargs)  # the unpatched one
@@ -271,6 +317,25 @@ class TailTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([], pieces)
         self.assertGreaterEqual(time.monotonic() - started, 0.05)
+
+    async def test_tail_ends_when_the_log_is_closed(self):
+        self.logs.append(EID, 1, b"one\n")
+        self.logs.close(EID)
+        started = time.monotonic()
+
+        pieces = [piece async for piece in tail(self.logs, EID, 0,
+                                                poll_s=0.01, idle_s=60)]
+
+        self.assertEqual([(1, b"one\n")], pieces)
+        self.assertLess(time.monotonic() - started, 5)  # not the 60 s limit
+
+    async def test_tail_stops_waiting_once_the_attempt_ends(self):
+        stream = tail(self.logs, EID, 0, poll_s=0.01, idle_s=60)
+        self.addAsyncCleanup(aclose, stream)
+
+        self.logs.close(EID)
+
+        self.assertEqual([], [piece async for piece in stream])
 
 
 if __name__ == "__main__":

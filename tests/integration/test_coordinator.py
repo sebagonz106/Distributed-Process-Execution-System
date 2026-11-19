@@ -84,7 +84,7 @@ class CoordinatorTestCase(unittest.TestCase):
             os.path.join(folder, "logs"),
         )
         cls.coordinator = Coordinator.options(scheduling_strategy=here).remote(
-            stand_in_executor, cls.store,
+            stand_in_executor, cls.store, cls.logs,
             os.path.join(folder, "coordinator.sqlite"),
             queue_timeout_s=cls.queue_timeout_s,
         )
@@ -104,7 +104,8 @@ class CoordinatorTestCase(unittest.TestCase):
         deadline = time.monotonic() + timeout_s
         view = self.status(job_id)
         while view["state"] in ("PENDING", "RUNNING"):
-            self.assertLess(time.monotonic(), deadline, "the job never finished")
+            self.assertLess(time.monotonic(), deadline,
+                            "the job never finished")
             time.sleep(0.2)
             view = self.status(job_id)
         return view

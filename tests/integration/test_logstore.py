@@ -6,6 +6,7 @@ Run inside the control node:
         python -m unittest discover -s tests/integration
 """
 
+import os
 import tempfile
 import time
 import unittest
@@ -13,12 +14,16 @@ import unittest
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
-from dpes.coordinator import LogStore
+from dpes.coordinator import BlobStore, LogStore, _StoreClient
+from dpes.executor import execute
+from dpes.messages import Attempt
 
 EID = "job-1/compile/0/1"
 
 
-class LogStoreTest(unittest.TestCase):
+class StoreFixture(unittest.TestCase):
+    """The log store and the blob store of one class, on this node."""
+
     @classmethod
     def setUpClass(cls):
         # Quiet: these check what the store returns; tests/host checks logs.
@@ -26,15 +31,26 @@ class LogStoreTest(unittest.TestCase):
                  ignore_reinit_error=True, log_to_driver=False)
         cls.folder = tempfile.mkdtemp(prefix="dpes-logs-")
         cls.logs = cls.actor()
+        cls.blobs = BlobStore.options(
+            scheduling_strategy=cls.on_this_node()
+        ).remote(os.path.join(cls.folder, "blobs"),
+                 os.path.join(cls.folder, "results.sqlite"))
+
+    @staticmethod
+    def on_this_node():
+        """Stay on this node, as the control node's actors do: their folder is
+        that node's volume."""
+        return NodeAffinitySchedulingStrategy(
+            ray.get_runtime_context().get_node_id(), soft=False
+        )
 
     @classmethod
     def actor(cls):
         """A store on this node over the folder the class shares, as on the
         control node (its folder is that node's volume)."""
-        here = NodeAffinitySchedulingStrategy(
-            ray.get_runtime_context().get_node_id(), soft=False
-        )
-        return LogStore.options(scheduling_strategy=here).remote(cls.folder)
+        return LogStore.options(
+            scheduling_strategy=cls.on_this_node()
+        ).remote(cls.folder)
 
     @classmethod
     def tearDownClass(cls):
@@ -47,6 +63,10 @@ class LogStoreTest(unittest.TestCase):
     def read(self, offset=0, limit=None, execution_id=EID):
         return ray.get(self.logs.read_fragments.remote(
             execution_id, offset, limit))
+
+
+class LogStoreTest(StoreFixture):
+    """What the actor stores, refuses, serves and recovers."""
 
     def test_a_fragment_written_through_the_actor_comes_back(self):
         self.assertTrue(self.append(1, b"hola\n"))
@@ -113,6 +133,40 @@ class LogStoreTest(unittest.TestCase):
                 if time.monotonic() > deadline:
                     raise
                 time.sleep(0.1)
+
+
+class ExecutorEmissionTest(StoreFixture):
+    """The executor shipping a real attempt's output, as a worker does
+    (plan/15, D15.3 and D15.8): the fragments come out of the actor."""
+
+    def run_executor(self, execution_id, script):
+        attempt = Attempt(
+            job_id=execution_id.split("/")[0], task="compile", round=0,
+            execution_id=execution_id, command=("sh", "-c", script),
+            env={}, inputs={}, outputs=(), timeout_s=10.0,
+        )
+        return execute(attempt, _StoreClient(self.blobs, self.logs))
+
+    def test_the_output_of_an_attempt_reaches_the_store(self):
+        execution_id = "job-6/compile/0/1"
+
+        result = self.run_executor(execution_id, "echo one; echo two >&2")
+
+        pieces = self.read(execution_id=execution_id)
+        self.assertEqual(0, result.exit_code)
+        self.assertEqual(b"one\ntwo\n", b"".join(data for _, data in pieces))
+
+    def test_a_tail_ends_as_soon_as_the_attempt_does(self):
+        execution_id = "job-7/compile/0/1"
+        # An idle limit of a minute: only the end marker can close it sooner.
+        stream = self.logs.tail_fragments.remote(execution_id, 0, 0.02, 60.0)
+
+        self.run_executor(execution_id, "echo done")
+
+        began = time.monotonic()
+        self.assertEqual(b"done\n", b"".join(
+            data for _, data in (ray.get(ref) for ref in stream)))
+        self.assertLess(time.monotonic() - began, 30)
 
 
 if __name__ == "__main__":

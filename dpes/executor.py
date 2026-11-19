@@ -9,6 +9,7 @@ import os
 import shutil
 import socket
 import tempfile
+import threading
 import time
 
 from dpes import sandbox
@@ -18,13 +19,20 @@ from dpes.messages import Attempt, Evidence, ExecutorFailure, TaskResult
 
 _HANG_S = 3600  # longer than any deadline: the coordinator cancels first
 _SAVE_WAITS = (0.5, 1, 2)  # seconds before each retry of the save (D12.3)
+_SEND_WAITS = (0.5, 1, 2)  # seconds before each retry of a fragment (D15.8)
 _FAULTS = ("crash", "hang", "network", "lose-ack")
+FRAGMENT_BYTES = 4096  # what one fragment holds at most (D15.3)
+FRAGMENT_LINES = 100  # ... or the lines it holds, whichever comes first
+FLUSH_S = 0.5  # ... or how long it waits with nothing more to add
+FOLLOW_S = 0.05  # how often the emitter looks for new output
+JOIN_S = 3.0  # how long the attempt waits for its log to end (RUN_MARGIN_S)
 _log = logging.getLogger(__name__)
 
 
 def execute(attempt: Attempt, store):
-    """`store` has get(digest) -> bytes or None, put(bytes) -> digest, and
-    save_result(key, result) -> the confirmed result for that key."""
+    """`store` has get(digest) -> bytes or None, put(bytes) -> digest,
+    save_result(key, result) -> the confirmed result for that key, and
+    append_fragment / close_fragments for the log (plan/15, D15.8)."""
     eid = attempt.execution_id
     # Program and argument count only: arguments and env may hold secrets.
     event(_log, logging.INFO, "attempt running", execution=eid,
@@ -53,10 +61,21 @@ def execute(attempt: Attempt, store):
         failure = _place_inputs(attempt, store, workspace)
         if failure:
             return failure
+        try:
+            emission = _Emitter(store, eid).start()
+        except OSError as error:
+            event(_log, logging.ERROR, "no file for the output",
+                  execution=eid, error=str(error))
+            return ExecutorFailure(eid, Evidence.WORKSPACE_FAILED,
+                                   str(error))
         started = time.monotonic()
-        outcome = sandbox.run(
-            attempt.command, attempt.env, attempt.timeout_s, workspace
-        )
+        try:
+            outcome = sandbox.run(
+                attempt.command, attempt.env, attempt.timeout_s, workspace,
+                sink=emission.sink,
+            )
+        finally:
+            emission.stop()  # however the command ended, its log ends here
         event(_log, logging.INFO, "command finished", execution=eid,
               exit_code=outcome.exit_code, timed_out=outcome.timed_out,
               duration_s=round(time.monotonic() - started, 3))
@@ -152,6 +171,174 @@ def _collect_outputs(attempt, store, workspace, outputs, missing):
               execution=attempt.execution_id, files=len(outputs),
               missing=len(missing))
     return None
+
+
+class _Emitter:
+    """Ships an attempt's output to the log store while the command runs.
+
+    The command writes to `sink`; a second handle follows the same file and
+    sends whole fragments from it (D15.3), so the log grows with the task and
+    survives the worker (F5.4). Best effort by design: a fragment the store
+    never takes is counted, never raised, because a log cannot fail a task.
+    Fragments are bytes: a reader joins them before decoding, as a cut can
+    fall inside a character.
+    """
+
+    def __init__(self, store, execution_id):
+        self.sink, self._follower = _capture()
+        self._store = store
+        self._execution_id = execution_id
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True,
+                                        name="dpes-log")
+        self._pending = b""  # read and not sent yet
+        self._seq = self._sent = self._lost = 0
+        self._bytes = 0  # of output that reached the store
+        self._last_send = time.monotonic()
+        self._down = False  # the store is refusing: stop trying
+        self._fault = None
+
+    def start(self):
+        self._thread.start()
+        return self
+
+    def stop(self):
+        """No more output: send the rest, end the log, close both files.
+
+        Bounded: the coordinator allows RUN_MARGIN_S (5 s) past the command's
+        own deadline, so a store that does not answer must not hold the attempt
+        longer than JOIN_S. The thread is a daemon and finishes on its own."""
+        self._stop.set()
+        self._thread.join(JOIN_S)
+
+    def _run(self):
+        try:
+            self._follow()
+        except Exception as error:  # the followed file failed under us
+            self._fault = f"{type(error).__name__}: {error}"
+        finally:
+            try:
+                self._finish()
+            except Exception as error:  # a log never kills the attempt
+                self._fault = self._fault or f"{type(error).__name__}: {error}"
+            self.sink.close()
+            self._follower.close()
+            self._report()
+
+    def _follow(self):
+        """Read what the command writes, in fragments, until it is over."""
+        while True:
+            if self._down:  # nowhere to send it: let the file grow in peace
+                if self._stop.wait(FLUSH_S):
+                    return
+                continue
+            data = self._follower.read(FRAGMENT_BYTES)
+            if data:
+                self._pending += data
+            self._send_ready(final=False)  # by size or by line
+            quiet = time.monotonic() - self._last_send
+            if self._pending and quiet >= FLUSH_S:
+                self._send_ready(final=True)  # by time
+            if self._stop.is_set() and not data:
+                return  # drained: the command will not write again
+            if not data:
+                time.sleep(FOLLOW_S)
+
+    def _send_ready(self, final):
+        while self._pending and not self._down:
+            cut = self._cut(final)
+            if cut is None:
+                return
+            self._ship(self._pending[:cut])
+            self._pending = self._pending[cut:]
+
+    def _cut(self, final):
+        """How many bytes the next fragment holds, or None if too few yet."""
+        size = len(self._pending)
+        if size >= FRAGMENT_BYTES:
+            limit = FRAGMENT_BYTES
+        elif self._pending.count(b"\n") >= FRAGMENT_LINES:
+            limit = self._after_lines()
+        elif final:
+            limit = size
+        else:
+            return None
+        # End on a line when one lies inside the limit, so a reader gets whole
+        # lines; otherwise the limit itself.
+        newline = self._pending.rfind(b"\n", 0, limit) + 1
+        return newline or limit
+
+    def _after_lines(self):
+        """Where the FRAGMENT_LINES-th line ends."""
+        at = -1
+        for _ in range(FRAGMENT_LINES):
+            at = self._pending.find(b"\n", at + 1)
+        return at + 1
+
+    def _ship(self, piece):
+        """Send one fragment under its own seq and retry it as it is: the store
+        drops a repeat, so a lost reply costs nothing. Once the retries are
+        spent the store is taken for dead and the rest of the log is lost."""
+        self._seq += 1
+        self._last_send = time.monotonic()
+        for wait in (0, *_SEND_WAITS):
+            time.sleep(wait)
+            try:
+                # False means an earlier try of this same seq landed.
+                self._store.append_fragment(
+                    self._execution_id, self._seq, piece
+                )
+                self._sent += 1
+                self._bytes += len(piece)
+                return
+            except Exception:  # the store or the way to it failed
+                continue
+        self._lost += 1
+        self._down = True  # retrying every fragment of a dead store is waste
+
+    def _finish(self):
+        self._send_ready(final=True)
+        if self._down:
+            return
+        for wait in (0, *_SEND_WAITS):
+            time.sleep(wait)
+            try:
+                self._store.close_fragments(self._execution_id)
+                return
+            except Exception:  # the store or the way to it failed
+                continue
+        self._fault = self._fault or "the log was not closed"
+
+    def _report(self):
+        if self._lost or self._fault:
+            event(_log, logging.WARNING, "log fragments lost",
+                  execution=self._execution_id, sent=self._sent,
+                  lost=self._lost,
+                  **({"error": self._fault} if self._fault else {}))
+        else:
+            event(_log, logging.INFO, "log closed",
+                  execution=self._execution_id, fragments=self._sent,
+                  bytes=self._bytes)
+
+
+def _capture():
+    """A write side for the command's output and a read side that follows it.
+
+    The file is unlinked at once, so a crash leaves nothing behind, and both
+    sides keep their own offset into the same inode: the command writes through
+    the first, the emitter reads through the second. The first is opened for
+    reading too, because `sandbox.run` takes the tail of the output from it."""
+    fd, path = tempfile.mkstemp(prefix="dpes-output-")
+    try:
+        sink = os.fdopen(fd, "r+b", buffering=0)
+        try:
+            followed = open(path, "rb", buffering=0)
+        except OSError:
+            sink.close()
+            raise
+    finally:
+        os.unlink(path)  # the handles keep the inode alive
+    return sink, followed
 
 
 def _transfer_failed(eid, evidence, detail):

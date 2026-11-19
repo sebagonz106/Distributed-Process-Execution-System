@@ -139,6 +139,9 @@ class LogEmitter:
 - El ejecutor debe importar \`threading\` (ya lo hace para \`signal\` en sandbox).
 - El cliente de almacenamiento (\`_StoreClient\`) gana método \`append_fragment(execution_id, seq, data)\`.
 - Si el hilo falla al enviar (red, store caído), loggea warning y reintenta con backoff simple (3 intentos, 0.5s). No bloquea la ejecución del comando.
+- El comando y el emisor no pueden compartir un descriptor con una sola posición: el ejecutor crea el archivo de salida, lo deja sin nombre (`unlink` inmediato) y lo lee por un segundo descriptor con posición propia. Sandbox pasa a aceptar el archivo del llamante (`sink`) en vez de crear siempre el suyo.
+- Un almacén que no acepta un fragmento ni tras los tres reintentos se da por caído: el emisor deja de enviar el resto de ese intento (un log no puede tumbar un trabajo) y lo declara con un `WARNING` con `execution=` y `lost=`. Reintentar cada fragmento de un almacén muerto solo retrasaría la tarea.
+- El ejecutor espera al emisor como mucho `JOIN_S = 3` s, por debajo del margen `RUN_MARGIN_S = 5` s del coordinador (D09.4); si el hilo sigue vivo, es *daemon* y termina solo.
 
 ---
 
@@ -420,6 +423,59 @@ por defecto, sin reinicios.
   cliente puede volver a pedirlo desde el último byte recibido, que es el mismo
   trato que un cierre por inactividad (D15.4).
 
+### D15.14 — El final del log de un intento
+
+**Contexto:** D15.1 numera los fragmentos desde 1 y el almacén rechaza un
+fragmento vacío (D15.2). D15.4 cierra un `tail` solo tras `IDLE_S` (300 s) sin
+datos nuevos. Sin una señal explícita, un `logs -f` sobre un intento ya terminado
+se queda cinco minutos esperando una salida que no va a llegar, y la pasarela no
+puede distinguir «no hay más por ahora» de «no habrá más».
+
+**Opciones consideradas:**
+1. **Nada:** el seguidor espera `IDLE_S`. Cero código; cinco minutos de espera
+   al final de cada `logs -f` y ninguna forma de saber que el intento acabó.
+2. **Fragmento centinela con bytes reservados** (por ejemplo
+   `\x00DPES-EOF`): se mezcla con la salida, y una tarea puede escribir esos
+   mismos bytes, así que el lector no puede distinguirlos.
+3. **Bandera en la llamada** (`append_fragment(..., eof=True)`): cambia el
+   contrato de D15.1/D15.8 y el formato en disco para guardar un booleano en
+   cada fragmento.
+4. **Registro de fin con `seq = 0`:** D15.1 reserva del 1 en adelante, así que 0
+   no puede ser un fragmento; el mismo registro `(seq, longitud)` con `(0, 0)`
+   marca el final sin cambiar el formato ni añadir un campo.
+5. **Estado solo en memoria del actor:** se pierde al reiniciarlo (D15.12), justo
+   cuando el cliente sigue leyendo.
+
+**Decisión:** Opción 4 — un registro `(0, 0)` al cerrar, con `LogDir.close`,
+`LogStore.close_fragments` y `_StoreClient.close_fragments`.
+
+**Porqué:**
+- Reutiliza el formato de D15.2 tal cual: no cambia la versión del encabezado ni
+  el tamaño de los registros ya escritos, y un archivo escrito antes de esta
+  decisión se sigue leyendo (sin marca de fin).
+- `seq = 0` no puede confundirse con salida, porque el almacén exige `seq >= 1`,
+  y una longitud 0 no aporta bytes: el índice y los offsets en bytes de D15.11
+  no cambian.
+- Es durable: un actor reiniciado vuelve a ver el fin al escanear el archivo,
+  que es lo que la opción 5 no consigue.
+- El `tail` termina en cuanto ve el fin, así que `logs -f` no se queda colgado
+  cinco minutos sobre un intento terminado; la garantía F5.4 no cambia, porque
+  el fin no añade salida.
+
+**Consecuencias:**
+- `close` es idempotente: la segunda llamada devuelve `False`.
+- Un `append` posterior a `close` es `ValueError`: no es un reintento tardío
+  admisible, sino un error de programación (el emisor para antes de cerrar).
+- Un registro de fin cortado por una caída no cuenta: al escanear se descarta el
+  último registro incompleto (D15.2), el archivo se trunca y el intento queda sin
+  fin; el `tail` vuelve a esperar `IDLE_S`.
+- El emisor cierra siempre el log, incluso cuando el comando no imprimió nada:
+  el fin no es un fragmento y no aparece en la salida, pero es lo que permite que
+  `logs -f` termine en cuanto el intento acaba.
+- **Límite:** si el almacén no responde tras los reintentos de D15.8, el emisor
+  deja de enviar el resto del log de ese intento y no lo cierra; la tarea no falla
+  por ello (un log no puede tumbar un trabajo) y el `tail` acaba por inactividad.
+
 ---
 
 ## 3. Contratos entre componentes (resumen)
@@ -427,6 +483,7 @@ por defecto, sin reinicios.
 | Productor | Consumidor | Contrato | Notas |
 |-----------|------------|----------|-------|
 | Executor (hilo emisor) | LogStore (actor) | \`append_fragment(eid, seq, bytes) -> bool\` | Idempotente por seq |
+| Executor (hilo emisor) | LogStore (actor) | \`close_fragments(eid) -> bool\` | Marca el fin (D15.14) |
 | LogStore (actor) | Gateway | \`read_fragments(eid, offset, limit) -> [(seq, bytes)]\` | Offset en bytes |
 | LogStore (actor) | Gateway | \`tail_fragments(eid, offset) -> AsyncIterator[(seq, bytes)]\` | Para streaming |
 | Scheduler (núcleo) | Coordinador (actor) | \`job._events -> List[Event]\` | Datos puros, sin Ray |
@@ -457,7 +514,8 @@ Al cerrar esta fase, actualizar tabla §2:
 |----|---------------|-------|--------|
 | R5 | Registro y transmisión de logs | 1, 4 | ✅ cumplido (C4, 2026-11-22) |
 
-Y añadir decisiones D15.1–D15.12 al registro de decisiones abiertas/cerradas.
+Y añadir decisiones D15.1–D15.12 y D15.14 al registro de decisiones
+abiertas/cerradas (D15.13 queda para §7).
 
 ---
 
@@ -517,8 +575,60 @@ Y añadir decisiones D15.1–D15.12 al registro de decisiones abiertas/cerradas.
 cliente que quiera seguir pide otra cola desde el último byte (D15.4). Ray no
 permite cancelar el generador remoto al cerrar el del llamante, de ahí el tope.
 
-**Siguiente:** Commit 3 (el ejecutor escribe fragmentos con un hilo emisor y
-`seq` monótono).
+### Commit 3 — el ejecutor emite lo que el comando imprime (2026-11-19)
+
+**Qué hay:**
+
+- `dpes/sandbox.py`: `run(..., sink=None)` usa el archivo que le da el llamante en
+  vez de crear siempre el suyo, y no lo cierra; la cola de 64 KiB (D07.14) se lee
+  por el mismo descriptor.
+- `dpes/executor.py`: `_Emitter`, un hilo *daemon* por intento que sigue ese
+  archivo desde el principio y envía fragmentos por
+  `store.append_fragment(eid, seq, data)` (D15.3, D15.8). Un fragmento acaba en
+  un salto de línea cuando hay uno dentro del tope, y si no en `FRAGMENT_BYTES =
+  4096`; también se corta a las `FRAGMENT_LINES = 100` líneas, o cuando pasan
+  `FLUSH_S = 0.5` s desde el último envío para que una salida a cuentagotas no
+  espere a llenar un fragmento. La `seq` empieza en 1 y solo avanza.
+  Al terminar el comando se envía lo que quede y `close_fragments` marca el fin
+  (D15.14), **siempre**, incluso si el comando no imprimió nada.
+- Mejor esfuerzo, por diseño: si el almacén rechaza un fragmento tras los tres
+  reintentos de `_SEND_WAITS`, se abandona el resto del log de ese intento con un
+  `WARNING` que lleva `execution=`, `sent=` y `lost=`; la tarea no falla. Cuando
+  todo llega, la única línea es `log closed` con `fragments=` y `bytes=` (D10.5).
+- `dpes/coordinator.py`: `_StoreClient(actor, logs)` añade `append_fragment` y
+  `close_fragments`; `_attempt` recibe el actor de logs y el `Coordinator` lo
+  guarda y lo pasa a cada intento. El ejecutor sigue sin conocer Ray (D07.17).
+
+**Pruebas:**
+
+| Lo que se afirma | Test que lo evidencia | Nivel |
+|------------------|-----------------------|-------|
+| La salida llega numerada y completa | `test_the_output_arrives_in_fragments_with_consecutive_seq` | Unit |
+| Fragmentos de líneas enteras, con tope de bytes | `test_a_long_output_comes_in_fragments_of_whole_lines` | Unit |
+| El corte por tiempo no espera a llenar el fragmento | `test_output_that_trickles_out_is_sent_without_a_full_fragment` | Unit |
+| Un comando mudo no produce fragmentos y aun así cierra el log | `test_the_log_is_ended_with_the_attempt_even_when_it_said_nothing` | Unit |
+| Un envío fallido se reintenta con la misma `seq` | `test_a_fragment_is_retried_under_the_same_seq` | Unit |
+| Un almacén que rechaza todo no hace fallar la tarea | `test_a_store_that_refuses_fragments_does_not_fail_the_task` | Unit |
+| Un almacén que muere a mitad abandona el resto de ese log sin cerrarlo | `test_a_store_that_dies_midway_abandons_the_rest_of_the_log` | Unit |
+| El ejecutor y el actor reales, juntos | `test_the_output_of_an_attempt_reaches_the_store` | Integration |
+| Una cola termina en cuanto acaba el intento (D15.14) | `test_a_tail_ends_as_soon_as_the_attempt_does` | Integration |
+| Reapertura, fin persistido y registro de fin truncado | `test_the_end_survives_reopening`, `test_an_end_marker_cut_short_does_not_count`, `test_a_log_closed_without_output_keeps_its_header` | Unit |
+
+**Verificación (2026-11-19, clúster de tres nodos):**
+
+- `py -W error -m unittest discover -s tests/unit` → 210 pruebas OK (2 saltadas
+  por ser de Linux).
+- En el nodo de control, `python -W error -m unittest discover -s tests/unit` →
+  258 pruebas OK (sin saltos).
+- `tests/integration` → 28 pruebas OK; `tests/e2e` → 23 pruebas OK.
+- `py -m unittest discover -s tests/host` → 8 pruebas OK.
+- Comprobación fuera de las pruebas, con el coordinador real: una tarea que
+  imprime 2000 líneas deja 7 fragmentos, `seq` 1..7 consecutivas, 18893 bytes que
+  coinciden byte a byte con la salida, el mayor de 4095 bytes; `tail` desde 0
+  termina en 0,03 s en vez de esperar 300 s, y el archivo en el volumen acaba en
+  el registro `(0, 0)`.
+
+**Siguiente:** Commit 4 (la pasarela sirve los logs por offset y en vivo).
 
 ---
 
@@ -550,21 +660,21 @@ queda reservado para la decisión.
    el `put` de artefactos, falla el punto de confirmación y el coordinador deja
    de poder anotar su diario. Una tarea vuelve poco fiable al nodo de control
    entero.
-3. **La Fase 4 agrava el problema a propósito.** Hoy la salida vive en un
-   `tempfile.TemporaryFile()` del trabajador y solo se conservan 64 KiB
-   (D07.14). Desde el Commit 3, cada fragmento se copia al volumen y se queda:
-   cumplir F5.4 (lo transmitido sobrevive al trabajador) y no acotar el volumen
-   son la misma decisión vista desde dos lados.
+3. **La Fase 4 agrava el problema a propósito.** Antes, la salida vivía en un
+   temporal del trabajador y del intento solo se conservaban 64 KiB (D07.14).
+   Desde el Commit 3, cada fragmento se copia al volumen y se queda: cumplir F5.4
+   (lo transmitido sobrevive al trabajador) y no acotar el volumen son la misma
+   decisión vista desde dos lados.
 4. **Es rápido.** Medido en la máquina de desarrollo: 604 MB/s escribiendo
    bloques de 4 KiB sin búfer a un archivo (623 MB en un segundo). A ese ritmo,
    10 GB son menos de veinte segundos de escritura sostenida; la caché del
    sistema difiere la descarga al disco, no la evita.
 5. **El fallo llega por dos caminos.** (a) El volumen del nodo de control, con
-   los fragmentos ya enviados; (b) el disco del trabajador, porque el sandbox
-   escribe la salida completa en un temporal y el hilo emisor de D15.3 la lee a
-   su ritmo: si el almacén va más lento que el comando, el temporal crece sin
-   cota. D15.3 no define cola acotada ni descarte, así que hoy no hay
-   contrapresión en ninguno de los dos lados.
+   los fragmentos ya enviados; (b) el disco del trabajador, porque el ejecutor
+   guarda la salida completa en un temporal del que el emisor de D15.3 va
+   leyendo, y el archivo no se recorta al leerlo: mide lo que mida toda la
+   salida del comando mientras el intento dura. D15.3 no define tope de salida,
+   así que hoy no hay contrapresión en ninguno de los dos lados.
 
 ### 7.3 Opciones
 
@@ -574,23 +684,25 @@ queda reservado para la decisión.
 | 2 | **Retención por trabajo**: al cerrar, borrar los archivos de los intentos perdedores | Volumen a largo plazo | Un barrido y decidir quién lo hace | Los logs de los intentos fallidos, que son los más útiles para depurar, si no se conservan unos cuantos |
 | 3 | **Rotación por tamaño o antigüedad** en el actor | Todo | Índice por segmento, offsets estables, borrar mientras alguien lee | Los offsets de C4 (`logs -o N` exacto) si la numeración de la salida cambia al rotar |
 | 4 | **Límite fuera del sistema**: cuota del volumen (`--storage-opt size=`, `tmpfs size=`) o barrido externo | El anfitrión | Nada de código; configuración y documentación | No evita el fallo, lo convierte en `ENOSPC` (que el almacén ya trata como `OSError`, D15.2) y deja al sistema sin logs |
-| 5 | **Cola acotada con descarte y aviso** en el hilo emisor (lado trabajador) | El disco del trabajador | Una cola, una política de descarte y un aviso | Los fragmentos descartados no vuelven: hay que aceptar huecos en `seq` (el almacén los admite, D15.1) o renumerar |
+| 5 | **Tope de la captura en el trabajador**: el emisor deja de enviar y el archivo se trunca al pasar de N MiB | El disco del trabajador | Un contador en el emisor y una decisión sobre qué hace con el archivo | Lo que se sirve deja de coincidir con lo que el comando escribió, y truncar mueve los offsets de D15.4 |
 
-No son excluyentes: 1 + 2 + 5 es la combinación que menos código pide fuera del
-almacén y cubre los dos discos y las dos escalas de tiempo.
+No son excluyentes: 1 protege el volumen del nodo de control, 2 lo limpia con el
+tiempo y 5 el disco del trabajador; entre las tres cubren los dos discos y las dos
+escalas de tiempo sin tocar el formato de D15.2.
 
 ### 7.4 Preguntas que la decisión debe responder
 
 - ¿Tope por intento, retención por trabajo o las dos? ¿Por intento, por trabajo
   o por nodo?
-- Cuando se corta: ¿se descarta la cola del log y se avisa, o se rechazan los
-  fragmentos desde el principio?
+- Cuando se corta: ¿se descartan los fragmentos siguientes y se avisa, o se
+  rechazan desde el principio?
 - ¿Se conservan los logs de los intentos perdedores? ¿Cuántos y durante cuánto?
 - ¿Quién barre: el actor (perezoso, al abrir o escribir), el coordinador (al
   cerrar el trabajo) o algo externo al sistema?
-- ¿Qué ve un `tail` en curso cuando el archivo se trunca o se borra? Hoy
-  `read` devolvería `[]` y la cola acabaría por inactividad (D15.4); si eso
-  debe distinguirse de «no hay más salida», hace falta una señal.
+- ¿Qué ve un `tail` en curso cuando el archivo se trunca o se borra? Hoy `read`
+  devolvería `[]` y la cola acabaría por inactividad (D15.4), o al instante si
+  el intento ya estaba cerrado (D15.14); si eso debe distinguirse de «no hay más
+  salida», hace falta una señal.
 - ¿Cuenta el tope bytes de salida o también el índice (~145 B por fragmento)?
 
 ### 7.5 Objetivo
@@ -602,8 +714,8 @@ pruebas. La implementación mínima previsible:
   explícito en lugar de un `ValueError` genérico;
 - evento de sistema «log truncated» con `execution=` (D10.5), para que la
   truncación sea visible y no silenciosa;
-- prueba unitaria del tope y de que un `seq` posterior a un hueco sigue siendo
-  idempotente;
+- prueba unitaria del tope y de que el almacén sigue aceptando una `seq` que
+  salta un hueco (D15.1);
 - prueba de que un trabajo normal no cambia de comportamiento ni de rendimiento.
 
 **No forma parte del corte C4.** C4 se cierra con lo que hay: D15.2 y D15.12

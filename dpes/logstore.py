@@ -4,7 +4,9 @@ One append-only file per execution id (plan/15, D15.2). The file is named by
 the digest of the id, so no id can choose a path outside the root, and its
 header repeats the id so a mismatched file is caught (D15.11). After the header
 come `(seq, length, data)` records, little-endian; an index built by scanning
-the file turns a byte offset of the concatenated output into a read.
+the file turns a byte offset of the concatenated output into a read. The last
+record of a finished attempt is `(0, 0)`: seq 0 cannot be a fragment, so it can
+only mean `close` was called and no more output will come (D15.14).
 
 Ray-free: the actor that wraps this module lives in `coordinator.py` (D15.10),
 as `BlobStore` wraps `cas.BlobDir`. No locks: `append` and `read` never await,
@@ -24,6 +26,7 @@ IDLE_S = 300.0  # a tail that sees nothing new for this long ends (D15.4)
 
 _HEADER = struct.Struct("<4sBH")  # magic, version, execution id length
 _ENTRY = struct.Struct("<QI")  # seq, data length
+_END = _ENTRY.pack(0, 0)  # seq 0 cannot be a fragment: it ends the log
 _MAX_ID = (1 << 16) - 1
 _MAX_DATA = (1 << 32) - 1
 
@@ -53,6 +56,15 @@ class LogDir:
             raise ValueError("offset and limit cannot be negative")
         return self._attempt(execution_id).read(offset, limit)
 
+    def close(self, execution_id: str) -> bool:
+        """Say the attempt will write no more, so a follower can stop; False
+        if there was nothing to end (D15.14)."""
+        return self._attempt(execution_id).close()
+
+    def finished(self, execution_id: str) -> bool:
+        """Whether `close` was called for this attempt."""
+        return self._attempt(execution_id).finished
+
     def _path(self, execution_id):
         name = hashlib.sha256(execution_id.encode("utf-8")).hexdigest()
         return os.path.join(self._root, name + ".log")
@@ -69,11 +81,11 @@ async def tail(logs: LogDir, execution_id: str, offset: int,
                poll_s: float = POLL_S, idle_s: float = IDLE_S):
     """Yield (seq, data) from byte `offset` as `execution_id` writes them.
 
-    Ends once `idle_s` seconds pass with nothing new: a finished attempt says
-    nothing more, and the caller that wants to keep following can ask again
-    from the last byte it received (D15.4). Async because the actor serves
-    other calls while this waits; each `logs.read` runs whole, without an
-    await inside (D15.11).
+    Ends once the attempt says it is done (D15.14), or after `idle_s` seconds
+    with nothing new: a finished attempt says nothing more, and the caller that
+    wants to keep following can ask again from the last byte it received
+    (D15.4). Async because the actor serves other calls while this waits; each
+    `logs.read` runs whole, without an await inside (D15.11).
     """
     deadline = time.monotonic() + idle_s
     while True:
@@ -84,6 +96,8 @@ async def tail(logs: LogDir, execution_id: str, offset: int,
                 yield seq, data
             deadline = time.monotonic() + idle_s
             continue
+        if logs.finished(execution_id):
+            return  # nothing more will come: no need to wait for the deadline
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return
@@ -100,31 +114,55 @@ class _Attempt:
         self._end = 0  # file offset just past the last complete fragment
         self._size = 0  # bytes of output stored
         self._max_seq = 0
+        self._eof = False  # `close` was called: no fragment may follow
         self._load()
 
     def append(self, seq, data):
+        if self._eof:
+            raise ValueError(
+                f"the log of {self._execution_id} is already finished"
+            )
         if seq <= self._max_seq:
             return False  # already written, or a seq that arrived too late
-        record = _ENTRY.pack(seq, len(data)) + data
-        # Unbuffered, so a reader sees the fragment as soon as write returns.
-        # "wb" when no header was found: a new file, or one a crash left
-        # unfinished.
+        at = self._put(_ENTRY.pack(seq, len(data)) + data)
+        self._entries.append((seq, at + _ENTRY.size, len(data)))
+        self._end += _ENTRY.size + len(data)
+        self._size += len(data)
+        self._max_seq = seq
+        return True
+
+    def close(self):
+        """Write the end marker; False if the log was already finished."""
+        if self._eof:
+            return False
+        self._put(_END)
+        self._end += _ENTRY.size
+        self._eof = True
+        return True
+
+    @property
+    def finished(self):
+        return self._eof
+
+    def _put(self, record):
+        """Append one record at the end of the file, holding its offset.
+
+        The file is created, or started over, when it has no header: "wb" when
+        `_end` is 0, which a crash mid-creation also leaves. Unbuffered, so a
+        reader sees the record as soon as write returns, and a short write (a
+        full disk) is rolled back and raised instead of indexed."""
         with open(self._path, "ab" if self._end else "wb", buffering=0) as f:
             if not self._end:
                 header = _header(self._execution_id)
                 _write(f, header)  # a failure leaves _end at 0: "wb" next time
                 self._end = len(header)
-            data_at = self._end + _ENTRY.size
+            at = self._end
             try:
-                _write(f, record)  # it joins the index once it is on disk
+                _write(f, record)  # it counts once it is on disk
             except OSError:
-                f.truncate(self._end)  # never index bytes off the file
+                f.truncate(at)  # never index bytes off the file
                 raise
-        self._entries.append((seq, data_at, len(data)))
-        self._end += _ENTRY.size + len(data)
-        self._size += len(data)
-        self._max_seq = seq
-        return True
+        return at
 
     def read(self, offset, limit):
         end = self._size if limit is None else min(self._size, offset + limit)
@@ -173,6 +211,11 @@ class _Attempt:
             if len(head) < _ENTRY.size:
                 break
             seq, size = _ENTRY.unpack(head)
+            if seq == 0:  # the end marker (D15.14): nothing may follow it
+                if size == 0:
+                    self._eof = True
+                    self._end += _ENTRY.size
+                break
             data = f.read(size)
             if len(data) < size:
                 break  # a crash left the last fragment half written

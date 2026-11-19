@@ -3,6 +3,7 @@
 What is isolated and how: plan/07, D07.15 and D07.16.
 """
 
+import contextlib
 import os
 import signal
 import subprocess
@@ -21,7 +22,10 @@ class Outcome:
     output: str  # tail of stdout and stderr, interleaved as written
 
 
-def run(command, env, timeout_s, workspace) -> Outcome:
+def run(command, env, timeout_s, workspace, sink=None) -> Outcome:
+    """Run `command` in `workspace`; its output goes to `sink`, or to a file of
+    our own, and the tail of it comes back. `sink` is left open: the caller
+    follows it while the command runs (plan/15, D15.3)."""
     identity = {}
     if os.geteuid() == 0:
         # One Ray worker process runs one attempt at a time and live pids are
@@ -36,7 +40,11 @@ def run(command, env, timeout_s, workspace) -> Outcome:
 
     # A file, not a pipe: a background child would keep a pipe open and
     # reading it to the end would wait for that child.
-    with tempfile.TemporaryFile() as output:
+    with contextlib.ExitStack() as files:
+        if sink is None:
+            output = files.enter_context(tempfile.TemporaryFile())
+        else:
+            output = sink  # the caller's: closed by the caller
         try:
             process = subprocess.Popen(
                 command,

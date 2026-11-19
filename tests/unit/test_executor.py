@@ -16,12 +16,15 @@ from dpes.messages import Attempt, Evidence, ExecutorFailure, TaskResult
 
 class Blobs(dict):
     """In-memory store with the executor's interface (plan/11, D11.5;
-    plan/12, D12.1): blobs, and results where the first writer wins."""
+    plan/12, D12.1; plan/15, D15.8): blobs, results where the first writer
+    wins, and the log as the fragments that arrived."""
 
     def __init__(self, *args):
         super().__init__(*args)
         self.results = {}
         self.saves = []
+        self.fragments = []  # (seq, data) as the log store took them
+        self.closed = []  # execution ids whose log was ended
 
     def get(self, name):
         return super().get(name)
@@ -33,6 +36,14 @@ class Blobs(dict):
     def save_result(self, key, result):
         self.saves.append((key, result))
         return self.results.setdefault(key, result)
+
+    def append_fragment(self, execution_id, seq, data):
+        self.fragments.append((seq, data))
+        return True
+
+    def close_fragments(self, execution_id):
+        self.closed.append(execution_id)
+        return True
 
 
 def execute(attempt, store=None):
@@ -151,10 +162,18 @@ class ConfirmationTest(unittest.TestCase):
 
 
 class Broken:
+    """A store that cannot be reached at all: nothing gets in or out."""
+
     def get(self, name):
         raise ConnectionError("store unreachable")
 
     def put(self, data):
+        raise ConnectionError("store unreachable")
+
+    def append_fragment(self, execution_id, seq, data):
+        raise ConnectionError("store unreachable")
+
+    def close_fragments(self, execution_id):
         raise ConnectionError("store unreachable")
 
 
@@ -207,8 +226,9 @@ class InputsOutputsTest(unittest.TestCase):
                 self.assertEqual((path,), result.missing_outputs)
 
     def test_an_output_that_cannot_be_uploaded_is_a_failed_transfer(self):
-        failure = execute(attempt("echo hi > out", outputs=("out",)),
-                          Broken())
+        with mock.patch("dpes.executor._SEND_WAITS", (0, 0, 0)):
+            failure = execute(attempt("echo hi > out", outputs=("out",)),
+                              Broken())
 
         self.assertEqual(Evidence.OUTPUT_UPLOAD_FAILED, failure.evidence)
 
@@ -231,15 +251,14 @@ class ExecutorLogTest(unittest.TestCase):
     def test_an_attempt_logs_where_it_ran_and_how_it_ended(self):
         records = self.logged("INFO", lambda: execute(attempt("exit 4")))
 
-        running, finished, confirmed = records
-        self.assertEqual("attempt running", running.getMessage())
-        self.assertEqual("job-1/t/0/1", running.fields["execution"])
-        self.assertIn("host", running.fields)
-        self.assertEqual("command finished", finished.getMessage())
-        self.assertEqual(4, finished.fields["exit_code"])
-        self.assertEqual("job-1/t/0/1", finished.fields["execution"])
-        self.assertEqual("result confirmed", confirmed.getMessage())
-        self.assertEqual("job-1/t/0/1", confirmed.fields["winner"])
+        running = self.fields_of(records, "attempt running")
+        self.assertEqual("job-1/t/0/1", running["execution"])
+        self.assertIn("host", running)
+        finished = self.fields_of(records, "command finished")
+        self.assertEqual(4, finished["exit_code"])
+        self.assertEqual("job-1/t/0/1", finished["execution"])
+        confirmed = self.fields_of(records, "result confirmed")
+        self.assertEqual("job-1/t/0/1", confirmed["winner"])
 
     def fields_of(self, records, message):
         (record,) = [r for r in records if r.getMessage() == message]
@@ -290,6 +309,128 @@ class ExecutorLogTest(unittest.TestCase):
 
         self.assertEqual(("injected fault", "network"),
                          (records[0].getMessage(), records[0].fields["kind"]))
+
+
+class NoLogs(Blobs):
+    """A store whose log half is unreachable, as a partition leaves it."""
+
+    def append_fragment(self, execution_id, seq, data):
+        raise ConnectionError("store unreachable")
+
+    def close_fragments(self, execution_id):
+        raise ConnectionError("store unreachable")
+
+
+class SlowFirst(Blobs):
+    """Refuses the first fragment once, as a timed-out call would."""
+
+    def __init__(self):
+        super().__init__()
+        self.refusals = 1
+
+    def append_fragment(self, execution_id, seq, data):
+        if self.refusals:
+            self.refusals -= 1
+            raise ConnectionError("store unreachable")
+        return super().append_fragment(execution_id, seq, data)
+
+
+class DiesHalfway(Blobs):
+    """Takes one fragment and then stops answering, as a dying store would."""
+
+    def __init__(self):
+        super().__init__()
+        self.taken = 0
+
+    def append_fragment(self, execution_id, seq, data):
+        if self.taken:
+            raise ConnectionError("store unreachable")
+        self.taken += 1
+        return super().append_fragment(execution_id, seq, data)
+
+
+class LogEmissionTest(unittest.TestCase):
+    """The emitter of plan/15, D15.3: the output leaves the worker as it is
+    written, in numbered fragments, and the log is ended with the attempt."""
+
+    def run_with_store(self, script, store=None):
+        store = Blobs() if store is None else store
+        return execute(attempt(script), store), store
+
+    def test_the_output_arrives_in_fragments_with_consecutive_seq(self):
+        result, store = self.run_with_store(r"printf 'one\ntwo\n'")
+
+        seqs = [seq for seq, _ in store.fragments]
+        self.assertEqual(list(range(1, len(seqs) + 1)), seqs)
+        self.assertEqual(b"one\ntwo\n",
+                         b"".join(data for _, data in store.fragments))
+        self.assertEqual("one\ntwo\n", result.output_tail)
+
+    def test_a_long_output_comes_in_fragments_of_whole_lines(self):
+        expected = "".join(f"{n}\n" for n in range(1, 4001)).encode()
+
+        _, store = self.run_with_store("seq 1 4000")
+
+        self.assertGreater(len(store.fragments), 1)
+        self.assertEqual(expected, b"".join(d for _, d in store.fragments))
+        for _, data in store.fragments:
+            self.assertLessEqual(len(data), executor.FRAGMENT_BYTES)
+            self.assertTrue(data.endswith(b"\n"))
+
+    @mock.patch("dpes.executor.FLUSH_S", 0.05)
+    def test_output_that_trickles_out_is_sent_without_a_full_fragment(self):
+        _, store = self.run_with_store("echo first; sleep 0.5; echo second")
+
+        self.assertEqual([b"first\n", b"second\n"],
+                         [data for _, data in store.fragments])
+
+    def test_the_log_is_ended_with_the_attempt_even_when_it_said_nothing(self):
+        result, store = self.run_with_store("true")
+
+        self.assertEqual([], store.fragments)  # no fragment for no output
+        self.assertEqual([result.execution_id], store.closed)
+
+    @mock.patch("dpes.executor._SEND_WAITS", (0, 0, 0))
+    def test_a_fragment_is_retried_under_the_same_seq(self):
+        store = SlowFirst()
+
+        self.run_with_store("echo hi", store)
+
+        self.assertEqual([(1, b"hi\n")], store.fragments)
+
+    @mock.patch("dpes.executor._SEND_WAITS", (0, 0, 0))
+    def test_a_store_that_refuses_fragments_does_not_fail_the_task(self):
+        store = NoLogs()
+        ran = []
+
+        with self.assertLogs("dpes.executor", "WARNING") as caught:
+            ran.append(self.run_with_store("echo hi", store))
+
+        task, _ = ran[0]
+        self.assertIsInstance(task, TaskResult)
+        self.assertEqual((0, "hi\n"), (task.exit_code, task.output_tail))
+        self.assertEqual([], store.fragments)
+        self.assertEqual([], store.closed)
+        fields = [r.fields for r in caught.records
+                  if r.getMessage() == "log fragments lost"]
+        self.assertEqual(1, len(fields))
+        self.assertEqual(1, fields[0]["lost"])
+        self.assertEqual("job-1/t/0/1", fields[0]["execution"])
+
+    @mock.patch("dpes.executor._SEND_WAITS", (0, 0, 0))
+    def test_a_store_that_dies_midway_abandons_the_rest_of_the_log(self):
+        store = DiesHalfway()
+        first = "".join(f"{n}\n" for n in range(1, 101)).encode()
+
+        with self.assertLogs("dpes.executor", "WARNING") as caught:
+            task = self.run_with_store("seq 1 200", store)[0]
+
+        self.assertEqual(0, task.exit_code)
+        self.assertEqual([(1, first)], store.fragments)  # no fragment after it
+        self.assertEqual([], store.closed)  # and no end marker either
+        fields = [r.fields for r in caught.records
+                  if r.getMessage() == "log fragments lost"][0]
+        self.assertEqual((1, 1), (fields["sent"], fields["lost"]))
 
 
 class Stopped(Exception):
