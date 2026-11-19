@@ -1,7 +1,7 @@
 # 15 — Fase 4: logs de tareas en vivo y historial de eventos
 
 - **Fecha:** 2026-11-18
-- **Estado:** en curso (Commit 1: decisiones y contratos)
+- **Estado:** en curso (Commit 2: actor `LogStore` y su núcleo en disco)
 - **Paso:** Fase 4 de [03-fases-y-dependencias.md](03-fases-y-dependencias.md)
 - **Requisito:** R5 (registro y transmisión de logs)
 - **Corte:** C4 — \`logs -f\` muestra líneas mientras la tarea corre; tras matar el worker a mitad, lo emitido sigue consultable; \`events\` muestra historial con execution IDs, transiciones, clases de fallo y esperas de reintento
@@ -65,7 +65,20 @@
 **Consecuencias:**
 - El índice en memoria (mapa \`seq -> file_offset\`) se reconstruye escaneando el archivo al abrir (rápido: lectura secuencial una sola vez).
 - Tamaño máximo de archivo = salida total de la tarea. Si una tarea produce GBs, el archivo crece sin límite (documentar como límite conocido, F5.4 cubre supervivencia, no rotación).
-- Rotación/retención de logs queda fuera de alcance (Fase 8 o post-entrega).
+- El índice también crece con los fragmentos, no solo con los bytes: cada
+  fragmento añade una tupla `(seq, desplazamiento en la salida, longitud)` a la
+  lista del intento, y esa lista vive en la memoria del actor mientras viva. Con
+  el intérprete de CPython 3.13 son ~145 B por fragmento (medido): 1 GiB de
+  salida en fragmentos de 4 KiB son ~38 MB de RAM, por intento. Aceptable para
+  el alcance —los trabajos de la asignatura producen MB, no GB—, pero es el
+  coste que crece si se sube el tamaño de la salida o se baja el del fragmento.
+- Nada borra ni rota: los archivos de `/var/lib/dpes/logs` se acumulan para
+  siempre, y comparten el volumen `dpes-data` con los blobs, `results.sqlite` y
+  `coordinator.sqlite` del mismo nodo de control. Una tarea que imprima en bucle
+  puede llenar ese volumen y arrastrar a los demás componentes; hoy el único
+  tope es el disco del anfitrión. Retención y rotación quedan fuera de alcance
+  (Fase 8 o post-entrega), no porque no se vean, sino porque no las pide R5 y
+  añadirlas obliga a decidir política (¿cuánto se guarda?, ¿quién barre?).
 
 **Estructura del archivo:**
 ```
@@ -331,6 +344,84 @@ class _StoreClient:
 
 ---
 
+### D15.11 — Nombre y encabezado del archivo de un intento
+
+**Contexto:** D15.2 fija un archivo por intento y un encabezado que repite el
+identificador de ejecución. El identificador (`job/task/round/attempt`, D07.5)
+contiene barras: usarlo tal cual como nombre crearía subcarpetas dentro del
+almacén y, si alguna vez lo construyera el cliente, permitiría salir de su
+carpeta con `..`.
+
+**Opciones consideradas:**
+1. **Ruta anidada** `logs/{job}/{task}/{round}/{attempt}.log`, validando cada
+   componente.
+2. **Identificador escapado** (`/` por `_`), con riesgo de colisión entre
+   identificadores distintos.
+3. **Nombre = SHA-256 hexadecimal del identificador**; el encabezado guarda el
+   identificador completo.
+
+**Decisión:** Opción 3.
+
+**Porqué:**
+- El nombre no puede contener barras ni `..`: no hay forma de elegir la ruta
+  desde el identificador.
+- No hay colisiones razonables, y no hace falta validar el alfabeto del
+  identificador.
+- El encabezado de D15.2 deja de ser redundante: sirve para detectar un archivo
+  mal nombrado, truncado o mezclado, y para saber de qué intento es sin fiarse
+  del nombre.
+- Para leer, el almacén calcula el mismo hash y el encabezado confirma que el
+  archivo corresponde al intento pedido.
+
+**Consecuencias:**
+- El archivo se llama `<sha256>.log` dentro de `/var/lib/dpes/logs`; listar por
+  nombre legible no es posible (para eso está el encabezado).
+- Un archivo cuyo encabezado no coincide con el intento pedido se rechaza con
+  `ValueError` en vez de servirse.
+- **Sin cerrojos en el núcleo:** el bucle de un actor asíncrono no cambia de
+  llamada salvo en un `await`; `append` y `read` no esperan nunca, así que cada
+  uno corre entero y `LogDir` no toma cerrojos. El `tail` sí espera (`await
+  asyncio.sleep`), de ahí que no bloquee los `append` de los ejecutores.
+
+### D15.12 — El actor del almacén se reinicia
+
+**Contexto:** el actor `LogStore` guarda su índice en memoria y su verdad en
+disco. Ray ofrece `max_restarts` por actor; `BlobStore` (plan/11) usa el valor
+por defecto, sin reinicios.
+
+**Opciones consideradas:**
+1. **Sin reinicios** (`max_restarts=0`, el valor por defecto): si el proceso del
+   actor muere, el nombre queda libre y el cliente que ya tiene el *handle* deja
+   de poder llamarlo hasta que la pasarela se reinicie.
+2. **`max_restarts=-1`**: Ray vuelve a crear el actor en el mismo nodo y el
+   *handle* con nombre sigue valiendo.
+3. **Hacer que el cliente recree el actor** cuando una llamada falla.
+
+**Decisión:** Opción 2 para `LogStore` (no se cambia `BlobStore`).
+
+**Porqué:**
+- El actor no tiene estado propio que perder: el constructor solo crea la
+  carpeta y el índice se reconstruye del archivo la primera vez que se toca un
+  intento (D15.2). Reiniciar no puede servir datos falsos.
+- Un `append` que se pierda por el reinicio se repite: es idempotente por `seq`
+  (D15.1) y el ejecutor ya reintenta la transmisión (Commit 3). Por eso el
+  reinicio no rompe la garantía «lo transmitido sobrevive» (F5.4): como mucho
+  retrasa un fragmento.
+- La opción 3 reparte por todo cliente (ejecutor y pasarela) la lógica de
+  recuperación, que es justo lo que no debe saber ninguno de los dos (D15.5).
+- Si el nodo de control entero cae, el nombre se pierde igual y da lo mismo la
+  opción; la durabilidad que se defiende es la del volumen, y esa sigue ahí.
+
+**Consecuencias:**
+- `max_restarts=-1` en el decorador de `LogStore`: un constructor que fallara
+  siempre provocaría reintentos con espera creciente de Ray (hoy el constructor
+  solo crea la carpeta).
+- Un `tail_fragments` en curso termina con error cuando el actor muere; el
+  cliente puede volver a pedirlo desde el último byte recibido, que es el mismo
+  trato que un cierre por inactividad (D15.4).
+
+---
+
 ## 3. Contratos entre componentes (resumen)
 
 | Productor | Consumidor | Contrato | Notas |
@@ -366,6 +457,156 @@ Al cerrar esta fase, actualizar tabla §2:
 |----|---------------|-------|--------|
 | R5 | Registro y transmisión de logs | 1, 4 | ✅ cumplido (C4, 2026-11-22) |
 
-Y añadir decisiones D15.1–D15.10 al registro de decisiones abiertas/cerradas.
+Y añadir decisiones D15.1–D15.12 al registro de decisiones abiertas/cerradas.
 
 ---
+
+## 6. Estado de la implementación
+
+### Commit 1 — decisiones y contratos (2026-11-18)
+
+`plan/15`. Sin código.
+
+### Commit 2 — el actor `LogStore` y su núcleo en disco (2026-11-18)
+
+**Qué hay:**
+
+- `dpes/logstore.py`: `LogDir` (puro, sin Ray) y `tail` (generador asíncrono).
+  Un archivo por intento, append-only, con encabezado que repite el
+  identificador y registros `(seq, longitud, datos)` en little-endian (D15.2,
+  D15.11). El índice `(seq, desplazamiento en la salida, longitud)` se
+  reconstruye escaneando el archivo al abrirlo, y una escritura interrumpida al
+  final se trunca (D15.2). Una escritura corta (un disco lleno puede aceptar
+  menos bytes sin fallar) se detecta, se deshace en el archivo y se propaga como
+  `OSError`, para que el índice nunca afirme más que el archivo.
+- `dpes/coordinator.py`: actor `LogStore` (asíncrono, `num_cpus=0`,
+  `max_restarts=-1` según D15.12) con `append_fragment`, `read_fragments` y
+  `tail_fragments`; se crea en `connect()` con `lifetime="detached"` y afinidad
+  de nodo, como `BlobStore`, sobre `/var/lib/dpes/logs` (el mismo volumen,
+  D15.2). `_Client` gana `read_fragments` y `tail_fragments`; el segundo conduce
+  el `ObjectRefGenerator` de Ray por dentro, así que la pasarela sigue sin saber
+  de Ray (D15.5).
+
+**Pruebas:**
+
+| Plan (§4) | Test que lo evidencia | Nivel |
+|-----------|-----------------------|-------|
+| `test_duplicate_fragment_ignored` | `test_a_duplicate_seq_is_ignored`, `test_a_seq_that_was_already_passed_is_ignored` | Unit |
+| Resumen por byte exacto | `test_a_byte_offset_slices_the_fragment_it_falls_in`, `test_a_limit_stops_mid_fragment` | Unit |
+| Persistencia del almacén | `test_fragments_survive_reopening`, `test_a_reopened_store_keeps_numbering_where_it_stopped`, `test_a_half_written_fragment_is_dropped_on_reopening`, `test_a_creation_cut_short_starts_over`, `test_a_header_cut_inside_the_execution_id_starts_over` | Unit |
+| Encabezado (D15.11) | `test_a_file_headed_by_another_attempt_is_refused`, `test_a_foreign_file_is_refused` | Unit |
+| Escritura corta, como la de un disco lleno | `test_a_short_write_is_an_error_and_leaves_no_trace` | Unit |
+| Cola viva | `test_tail_yields_what_arrives_while_it_waits`, `test_tail_ends_after_an_idle_stretch` | Unit |
+| El actor en el clúster | `tests/integration/test_logstore.py`: escritura, seq duplicado, cola en vivo y otro actor sobre la misma carpeta | Integration |
+| Reinicio del actor (D15.12) | `test_the_store_comes_back_after_its_process_is_killed` | Integration |
+
+**Verificación (2026-11-18, clúster de tres nodos):**
+
+- `py -W error -m unittest discover -s tests/unit` → 201 pruebas OK (2 saltadas
+  por ser de Linux).
+- En el nodo de control, `python -W error -m unittest discover -s tests/unit` →
+  241 pruebas OK (sin saltos: el espacio aislado corre como `root`).
+- `tests/integration` → 26 pruebas OK; `tests/e2e` → 23 pruebas OK.
+- `py -m unittest discover -s tests/host` → 8 pruebas OK.
+- Comprobación adicional fuera de las pruebas: 59 fragmentos de bytes
+  aleatorios, lectura desde los 1154 desplazamientos posibles y 300
+  `(offset, limit)` aleatorios contra la concatenación ingenua, y lo mismo tras
+  reabrir el almacén; todo coincide.
+
+**Límite conocido del `tail`:** termina tras `IDLE_S` (300 s) sin datos nuevos; el
+cliente que quiera seguir pide otra cola desde el último byte (D15.4). Ray no
+permite cancelar el generador remoto al cerrar el del llamante, de ahí el tope.
+
+**Siguiente:** Commit 3 (el ejecutor escribe fragmentos con un hilo emisor y
+`seq` monótono).
+
+---
+
+## 7. Crecimiento sin cota del almacén de logs (límite conocido, decisión pendiente)
+
+**Estado:** aceptado como límite conocido el 2026-11-18 y **sin decidir**. No es
+un descuido de implementación: es una política que no existe, y elegirla por
+omisión es justo lo que prohíbe la regla 7 del proyecto. El número **D15.13**
+queda reservado para la decisión.
+
+### 7.1 Lo que hoy no existe
+
+- Nada borra los archivos de `/var/lib/dpes/logs`: crecen con cada trabajo, cada
+  intento y cada reintento, para siempre.
+- No hay tope de bytes por intento. El único límite es el máximo de un fragmento
+  (4 GiB, el campo de longitud del formato, D15.2).
+- El índice en memoria tampoco se libera: un `LogDir` recuerda cada intento
+  abierto hasta que el actor muere o se reinicia (D15.12).
+- La pasarela no acota lo que sirve: el `limit` lo elige el cliente (D15.4).
+
+### 7.2 Por qué es una vulnerabilidad del sistema
+
+1. **El disco lo consume el trabajo, no el sistema.** El comando lo escribe el
+   cliente y nada impide un `while True: print(...)`. No hace falta un atacante:
+   basta un bucle de depuración olvidado.
+2. **Se degrada en cascada.** El volumen `dpes-data` guarda, en el mismo nodo de
+   control, los blobs (plan/11), `results.sqlite` (plan/12) y
+   `coordinator.sqlite` (plan/14). Un disco lleno no pierde «solo logs»: falla
+   el `put` de artefactos, falla el punto de confirmación y el coordinador deja
+   de poder anotar su diario. Una tarea vuelve poco fiable al nodo de control
+   entero.
+3. **La Fase 4 agrava el problema a propósito.** Hoy la salida vive en un
+   `tempfile.TemporaryFile()` del trabajador y solo se conservan 64 KiB
+   (D07.14). Desde el Commit 3, cada fragmento se copia al volumen y se queda:
+   cumplir F5.4 (lo transmitido sobrevive al trabajador) y no acotar el volumen
+   son la misma decisión vista desde dos lados.
+4. **Es rápido.** Medido en la máquina de desarrollo: 604 MB/s escribiendo
+   bloques de 4 KiB sin búfer a un archivo (623 MB en un segundo). A ese ritmo,
+   10 GB son menos de veinte segundos de escritura sostenida; la caché del
+   sistema difiere la descarga al disco, no la evita.
+5. **El fallo llega por dos caminos.** (a) El volumen del nodo de control, con
+   los fragmentos ya enviados; (b) el disco del trabajador, porque el sandbox
+   escribe la salida completa en un temporal y el hilo emisor de D15.3 la lee a
+   su ritmo: si el almacén va más lento que el comando, el temporal crece sin
+   cota. D15.3 no define cola acotada ni descarte, así que hoy no hay
+   contrapresión en ninguno de los dos lados.
+
+### 7.3 Opciones
+
+| # | Política | Qué protege | Qué cuesta | Qué rompe |
+|---|----------|-------------|-----------|-----------|
+| 1 | **Tope por intento** (N MiB, en `LogDir.append`) | Volumen y trabajador | Un contador por intento y una marca de corte | La cola del log: hay que decidir si se avisa (evento + indicador) o el cliente creería que la salida terminó ahí |
+| 2 | **Retención por trabajo**: al cerrar, borrar los archivos de los intentos perdedores | Volumen a largo plazo | Un barrido y decidir quién lo hace | Los logs de los intentos fallidos, que son los más útiles para depurar, si no se conservan unos cuantos |
+| 3 | **Rotación por tamaño o antigüedad** en el actor | Todo | Índice por segmento, offsets estables, borrar mientras alguien lee | Los offsets de C4 (`logs -o N` exacto) si la numeración de la salida cambia al rotar |
+| 4 | **Límite fuera del sistema**: cuota del volumen (`--storage-opt size=`, `tmpfs size=`) o barrido externo | El anfitrión | Nada de código; configuración y documentación | No evita el fallo, lo convierte en `ENOSPC` (que el almacén ya trata como `OSError`, D15.2) y deja al sistema sin logs |
+| 5 | **Cola acotada con descarte y aviso** en el hilo emisor (lado trabajador) | El disco del trabajador | Una cola, una política de descarte y un aviso | Los fragmentos descartados no vuelven: hay que aceptar huecos en `seq` (el almacén los admite, D15.1) o renumerar |
+
+No son excluyentes: 1 + 2 + 5 es la combinación que menos código pide fuera del
+almacén y cubre los dos discos y las dos escalas de tiempo.
+
+### 7.4 Preguntas que la decisión debe responder
+
+- ¿Tope por intento, retención por trabajo o las dos? ¿Por intento, por trabajo
+  o por nodo?
+- Cuando se corta: ¿se descarta la cola del log y se avisa, o se rechazan los
+  fragmentos desde el principio?
+- ¿Se conservan los logs de los intentos perdedores? ¿Cuántos y durante cuánto?
+- ¿Quién barre: el actor (perezoso, al abrir o escribir), el coordinador (al
+  cerrar el trabajo) o algo externo al sistema?
+- ¿Qué ve un `tail` en curso cuando el archivo se trunca o se borra? Hoy
+  `read` devolvería `[]` y la cola acabaría por inactividad (D15.4); si eso
+  debe distinguirse de «no hay más salida», hace falta una señal.
+- ¿Cuenta el tope bytes de salida o también el índice (~145 B por fragmento)?
+
+### 7.5 Objetivo
+
+Tomar la decisión (D15.13) y ejecutarla en un paso propio, con su corte y sus
+pruebas. La implementación mínima previsible:
+
+- contador de bytes por intento en `LogDir.append`, con un motivo de corte
+  explícito en lugar de un `ValueError` genérico;
+- evento de sistema «log truncated» con `execution=` (D10.5), para que la
+  truncación sea visible y no silenciosa;
+- prueba unitaria del tope y de que un `seq` posterior a un hueco sigue siendo
+  idempotente;
+- prueba de que un trabajo normal no cambia de comportamiento ni de rendimiento.
+
+**No forma parte del corte C4.** C4 se cierra con lo que hay: D15.2 y D15.12
+defienden la durabilidad, no la retención. Mientras no se decida, este apartado
+y el riesgo correspondiente de [00-contexto-y-restricciones.md](00-contexto-y-restricciones.md)
+§6 son el registro de la deuda; no se implementa nada por omisión.

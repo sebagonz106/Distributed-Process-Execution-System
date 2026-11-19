@@ -14,7 +14,7 @@ import unittest
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
-from dpes.coordinator import BlobStore, Coordinator, _Client
+from dpes.coordinator import BlobStore, Coordinator, LogStore, _Client
 from dpes.hashing import digest
 from dpes.messages import ResultKey
 from dpes.spec import SpecError, parse_job
@@ -79,6 +79,9 @@ class CoordinatorTestCase(unittest.TestCase):
         cls.store = BlobStore.options(scheduling_strategy=here).remote(
             os.path.join(folder, "blobs"),
             os.path.join(folder, "results.sqlite"),
+        )
+        cls.logs = LogStore.options(scheduling_strategy=here).remote(
+            os.path.join(folder, "logs"),
         )
         cls.coordinator = Coordinator.options(scheduling_strategy=here).remote(
             stand_in_executor, cls.store,
@@ -181,12 +184,12 @@ class CoordinatorTest(CoordinatorTestCase):
         spec = job(t={"command": ["0"], "resources": {"gpu": 1}})
 
         with self.assertRaises(SpecError) as caught:
-            _Client(self.coordinator, self.store).submit(spec)
+            _Client(self.coordinator, self.store, self.logs).submit(spec)
 
         self.assertIn("gpu", caught.exception.errors[0])
 
     def test_a_blob_goes_into_the_store_and_comes_back(self):
-        client = _Client(self.coordinator, self.store)
+        client = _Client(self.coordinator, self.store, self.logs)
 
         client.put_blob(digest(b"hola"), b"hola")
 
@@ -197,7 +200,7 @@ class CoordinatorTest(CoordinatorTestCase):
         spec = job(t={"command": ["0"], "inputs": {"a.c": digest(b"no")}})
 
         with self.assertRaises(SpecError) as caught:
-            _Client(self.coordinator, self.store).submit(spec)
+            _Client(self.coordinator, self.store, self.logs).submit(spec)
 
         self.assertIn("never uploaded", caught.exception.errors[0])
 
@@ -249,11 +252,11 @@ class LostConfirmationTest(CoordinatorTestCase):
         self.assertEqual(first, again)
 
     def test_the_same_key_for_another_job_is_refused(self):
-        _Client(self.coordinator, self.store).submit(
+        _Client(self.coordinator, self.store, self.logs).submit(
             job(t={"command": ["0"]}), "key-2")
 
         with self.assertRaises(SpecError) as caught:
-            _Client(self.coordinator, self.store).submit(
+            _Client(self.coordinator, self.store, self.logs).submit(
                 job(t={"command": ["3"]}), "key-2")
 
         self.assertIn("key-2", caught.exception.errors[0])

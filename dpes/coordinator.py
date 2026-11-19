@@ -20,6 +20,7 @@ from dpes.cas import BlobDir
 from dpes.failures import DEADLINE, RESTARTED, classify
 from dpes.hashing import digest
 from dpes.log import event, setup
+from dpes.logstore import IDLE_S, POLL_S, LogDir, tail
 from dpes.messages import ExecutorFailure, TaskResult
 from dpes.scheduler import Job, Launch, State
 from dpes.spec import SpecError, demand, unschedulable
@@ -32,6 +33,8 @@ STORE_NAME = "store"
 STORE_ROOT = "/var/lib/dpes/blobs"  # a Docker volume on the control node
 RESULTS_PATH = "/var/lib/dpes/results.sqlite"  # same volume (plan/12)
 JOURNAL_PATH = "/var/lib/dpes/coordinator.sqlite"  # same volume (plan/14)
+LOG_NAME = "logs"
+LOG_ROOT = "/var/lib/dpes/logs"  # same volume (plan/15, D15.2)
 STORE_TIMEOUT_S = 60  # a 16 MiB blob crosses the network
 QUEUE_TIMEOUT_S = 3600.0  # launch to start signal (D09.4)
 RUN_MARGIN_S = 5.0  # past the task's own time limit, silence is a failure
@@ -76,6 +79,36 @@ class BlobStore:
 
     def result(self, key):
         return self._results.get(key)
+
+
+# It rebuilds its index from disk, so Ray may restart it (D15.12); async, so a
+# tail that waits gives the event loop back and appends are served meanwhile.
+@ray.remote(num_cpus=0, max_restarts=-1)
+class LogStore:
+    """The log store on the control node: each attempt's output in numbered
+    fragments, on disk under the data volume (plan/15, D15.2). A worker's
+    death cannot take away what already arrived here (F5.4)."""
+
+    def __init__(self, root):
+        setup()
+        self._logs = LogDir(root)
+        event(logging.getLogger("dpes.logstore"), logging.INFO,
+              "log store started", root=root)
+
+    def append_fragment(self, execution_id, seq, data):
+        """Store `data` as fragment `seq`; False if that seq already is."""
+        return self._logs.append(execution_id, seq, data)
+
+    def read_fragments(self, execution_id, offset, limit=None):
+        """(seq, data) pieces covering bytes [offset, offset+limit)."""
+        return self._logs.read(execution_id, offset, limit)
+
+    async def tail_fragments(self, execution_id, offset, poll_s=POLL_S,
+                             idle_s=IDLE_S):
+        """(seq, data) as they arrive, for a client following the log."""
+        async for piece in tail(self._logs, execution_id, offset,
+                                poll_s, idle_s):
+            yield piece
 
 
 class _StoreClient:
@@ -366,9 +399,10 @@ def _placement(task):
 class _Client:
     """What the gateway calls: blocking calls with a deadline."""
 
-    def __init__(self, actor, store):
+    def __init__(self, actor, store, logs):
         self._actor = actor
         self._store = store
+        self._logs = logs
 
     def submit(self, spec, key=None):
         # Refused here, not queued forever in Ray (plan/08, D08.3).
@@ -403,6 +437,16 @@ class _Client:
     def get_blob(self, name):
         return ray.get(self._store.get.remote(name), timeout=STORE_TIMEOUT_S)
 
+    def read_fragments(self, execution_id, offset, limit=None):
+        reply = self._logs.read_fragments.remote(execution_id, offset, limit)
+        return ray.get(reply, timeout=CALL_TIMEOUT_S)
+
+    def tail_fragments(self, execution_id, offset):
+        """(seq, data) as the attempt writes them, for `logs -f` (D15.4)."""
+        generator = self._logs.tail_fragments.remote(execution_id, offset)
+        for ref in generator:  # Ray stays here: the gateway sees plain data
+            yield ray.get(ref)
+
 
 def connect() -> _Client:
     """Join the cluster and get, or create, the coordinator on this node."""
@@ -418,10 +462,16 @@ def connect() -> _Client:
         get_if_exists=True,
         scheduling_strategy=here,  # its folder is this node's volume (D11.5)
     ).remote(STORE_ROOT, RESULTS_PATH)
+    logs = LogStore.options(
+        name=LOG_NAME,
+        lifetime="detached",  # its files outlive a gateway restart (D15.2)
+        get_if_exists=True,
+        scheduling_strategy=here,  # its folder is this node's volume
+    ).remote(LOG_ROOT)
     actor = Coordinator.options(
         name=NAME,
         lifetime="detached",  # survives a gateway restart
         get_if_exists=True,
         scheduling_strategy=here,
     ).remote(execute, store, JOURNAL_PATH)
-    return _Client(actor, store)
+    return _Client(actor, store, logs)
