@@ -9,6 +9,7 @@ journal rebuilds it (plan/14).
 """
 
 import asyncio
+import dataclasses
 import logging
 import time
 import uuid
@@ -41,8 +42,23 @@ RUN_MARGIN_S = 5.0  # past the task's own time limit, silence is a failure
 _FINISHED = {State.SUCCEEDED, State.FAILED, State.ERROR}
 # The state machine method that each kind of journal entry calls (plan/14).
 _METHODS = {"running": "running", "result": "on_result",
-            "failure": "on_failure"}
+            "failure": "on_failure", "finished": "finished"}
 _log = logging.getLogger(__name__)
+
+
+class _Clock:
+    """Wall-clock time for the events of the state machine (D15.16).
+
+    Live, it is `time.time`. While a journaled call is being made or
+    replayed, it is the time recorded with that call: the events a restart
+    rebuilds keep the time they happened, not the time of the restart.
+    """
+
+    def __init__(self):
+        self.at = None
+
+    def __call__(self):
+        return time.time() if self.at is None else self.at
 
 
 @ray.remote(num_cpus=0)  # the real resources are set per launch
@@ -170,8 +186,16 @@ class Coordinator:
         self._submitted_at = {}
         self._started = {}  # execution id -> event set by the start signal
         self._in_flight = set()  # asyncio keeps only weak references to tasks
+        self._clock = _Clock()  # stamps the events of each journaled call
         self._journal = Journal(journal_path)
         launched = self._replay()
+        # A crash between a result and the end of the job leaves a journal
+        # without its `finished` call: record it now, so the feed of a job
+        # that is over ends where the job did (D15.17).
+        for job in self._jobs.values():
+            if job.state in _FINISHED and not job.done:
+                self._submitted_at[job.job_id] = None
+                self._log_if_finished(job)
         unfinished = [job for job in self._jobs.values()
                       if job.state not in _FINISHED]
         self._orphans = [(job, attempt, attempt.execution_id in launched)
@@ -198,12 +222,13 @@ class Coordinator:
                   key=key)
             return known.job_id
         job_id = uuid.uuid4().hex
-        self._journal.append(job_id, "accepted", spec, key)  # before replying
-        job = self._jobs[job_id] = Job(job_id, spec)
+        # Journaled before replying: from the journal on, the job exists.
+        at = self._journal.append(job_id, "accepted", spec, key)
+        job = self._jobs[job_id] = Job(job_id, spec, clock=self._clock)
         if key:
             self._by_key[key] = job_id
         self._submitted_at[job_id] = time.monotonic()
-        launches = job.start()
+        launches = self._journaled(at, job.start)
         event(_log, logging.INFO, "job started", job=job_id,
               tasks=len(spec.tasks), ready=len(launches))
         self._launch(job, launches)
@@ -225,6 +250,15 @@ class Coordinator:
         job = self._jobs.get(job_id)
         return job.view() if job else None
 
+    async def events(self, job_id: str):
+        """The job's events, oldest first (D15.5); None if there is no job.
+
+        Read from the state machine's in-memory feed, which the journal
+        rebuilds after a restart (D15.16).
+        """
+        job = self._jobs.get(job_id)
+        return [dataclasses.asdict(e) for e in job.events()] if job else None
+
     async def started(self, execution_id: str):
         event_ = self._started.get(execution_id)
         if event_:  # absent: the attempt was already given up
@@ -234,26 +268,36 @@ class Coordinator:
 
     def _replay(self):
         """Rebuild every job from the journal (plan/14, D14.1); return the
-        execution ids that were launched."""
+        execution ids that were launched. Each call is made at the time it was
+        recorded, so its events keep that time (D15.16)."""
         launched = set()
-        for job_id, kind, args in self._journal.events():
+        for job_id, kind, args, at in self._journal.events():
             if kind == "accepted":
                 spec, key = args
-                self._jobs[job_id] = Job(job_id, spec)
-                self._jobs[job_id].start()
+                job = self._jobs[job_id] = Job(job_id, spec, clock=self._clock)
+                self._journaled(at, job.start)
                 if key:
                     self._by_key[key] = job_id
                 continue
             if kind == "running":
                 launched.add(args[0])
-            getattr(self._jobs[job_id], _METHODS[kind])(*args)
+            self._journaled(at, getattr(self._jobs[job_id], _METHODS[kind]),
+                            *args)
         return launched
 
     def _apply(self, job, kind, *args):
         """Journal a call to the state machine, then make it: whatever the
         outside sees follows from the journal (plan/14, D14.2)."""
-        self._journal.append(job.job_id, kind, *args)
-        return getattr(job, _METHODS[kind])(*args)
+        at = self._journal.append(job.job_id, kind, *args)
+        return self._journaled(at, getattr(job, _METHODS[kind]), *args)
+
+    def _journaled(self, at, call, *args):
+        """Make `call` with the events it records stamped `at` (D15.16)."""
+        self._clock.at = at
+        try:
+            return call(*args)
+        finally:
+            self._clock.at = None
 
     def _launch(self, job, launches):
         for launch in launches:
@@ -375,8 +419,13 @@ class Coordinator:
             self._started.pop(eid, None)
 
     def _log_if_finished(self, job):
+        """Record that the job is over, once (D15.17), and log it."""
         state = job.state
-        if state not in _FINISHED or job.job_id not in self._submitted_at:
+        if state not in _FINISHED:
+            return
+        if not job.done:
+            self._apply(job, "finished")  # journaled: a restart replays it
+        if job.job_id not in self._submitted_at:
             return
         started = self._submitted_at.pop(job.job_id)
         took = {} if started is None else {  # None: recovered (plan/14)

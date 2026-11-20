@@ -1,9 +1,10 @@
 """Coordinator state machine: events in, attempts to launch out.
 
-Pure module: no Ray, no disk, no clock (plan/02, D02.3). Retry waits draw from
-a generator seeded with the job id, so the same calls rebuild the same job
-(plan/14, D14.1). Rules: plan/07 (D07.4 to D07.6), plan/08 (D08.4, D08.5) and
-plan/09 (D09.2 to D09.6).
+Pure module: no Ray, no disk, no clock of its own (plan/02, D02.3). Retry waits
+draw from a generator seeded with the job id, and the time an event is stamped
+with comes from a clock the caller injects, so the same calls rebuild the same
+job (plan/14, D14.1; plan/15, D15.16). Rules: plan/07 (D07.4 to D07.6),
+plan/08 (D08.4, D08.5) and plan/09 (D09.2 to D09.6).
 """
 
 import random
@@ -36,6 +37,29 @@ class Launch:
     delay_s: float = 0.0
 
 
+@dataclass(frozen=True)
+class Event:
+    """One step of a job's history, for clients (plan/15, D15.5).
+
+    Data, not an operational log (D10.4, D15.10): the coordinator journals the
+    calls that produce it and the gateway serves it. `timestamp` is wall-clock
+    seconds, taken from the injected clock (D15.16).
+    """
+
+    timestamp: float
+    type: str  # TASK_LAUNCHED, ATTEMPT_SUCCEEDED, ATTEMPT_FAILED,
+    #            RETRY_SCHEDULED, TASK_SKIPPED or JOB_FINISHED
+    job_id: str
+    task: str | None  # None for JOB_FINISHED: no single task is to blame
+    execution_id: str  # "" when no attempt is involved
+    payload: dict
+
+
+def _epoch() -> float:
+    """Time for a job built without a clock: unit tests only (D15.16)."""
+    return 0.0
+
+
 class _Task:
     def __init__(self, spec: TaskSpec):
         self.spec = spec
@@ -51,16 +75,19 @@ class _Task:
 
 
 class Job:
-    def __init__(self, job_id: str, spec: JobSpec, rand=None):
+    def __init__(self, job_id: str, spec: JobSpec, rand=None, clock=None):
         self.job_id = job_id
         self.spec = spec
         self._rand = rand or random.Random(job_id).random
+        self._clock = clock or _epoch
         self._tasks = {name: _Task(task) for name, task in spec.tasks.items()}
         self._dependents = {name: [] for name in spec.tasks}
         for name, task in spec.tasks.items():
             for need in task.needs:
                 self._dependents[need].append(name)
         self._running = {}  # execution id -> task name
+        self._events = []  # append-only, oldest first (D15.5)
+        self._done = False  # JOB_FINISHED recorded once (D15.17)
 
     def start(self) -> list[Launch]:
         """Launches for the tasks that depend on nothing."""
@@ -71,7 +98,10 @@ class Job:
         ]
 
     def running(self, execution_id: str) -> None:
-        """A retry that was waiting has just been launched."""
+        """A retry that was waiting has just been launched.
+
+        No event: `RETRY_SCHEDULED` already said when it was due (D15.18).
+        """
         name = self._running.get(execution_id)
         if name and self._tasks[name].state is State.RETRY_WAIT:
             self._tasks[name].state = State.RUNNING
@@ -79,6 +109,31 @@ class Job:
     def unsettled(self) -> list[Attempt]:
         """Attempts handed out and not settled yet (plan/14, D14.4)."""
         return [self._attempt(name) for name in self._running.values()]
+
+    def events(self) -> list[Event]:
+        """The job's history, oldest first, for clients (D15.5)."""
+        return list(self._events)
+
+    @property
+    def done(self) -> bool:
+        """Whether the end of the job is already in `events` (D15.17).
+
+        The coordinator asks before journaling: replaying the journal rebuilds
+        the event, so a finished job must not record it twice.
+        """
+        return self._done
+
+    def finished(self) -> None:
+        """Record that the job reached its terminal state (D15.17)."""
+        if self._done:  # replay or a repeated call: not a second end
+            return
+        self._done = True
+        counts = {}
+        for task in self._tasks.values():
+            key = task.state.value.lower()
+            counts[key] = counts.get(key, 0) + 1
+        self._record_event("JOB_FINISHED", "", None,
+                           state=self.state.value, counts=counts)
 
     def on_result(self, result: TaskResult, execution_id: str = "",
                   note: str = "") -> list[Launch]:
@@ -100,6 +155,11 @@ class Job:
         task.state = State.SUCCEEDED
         task.error = task.failure_class = None
         self._record(task, "SUCCEEDED", note, None)
+        payload = {"state": State.SUCCEEDED.value,
+                   "exit_code": result.exit_code}
+        if note:
+            payload["note"] = note  # an adopted result is worth explaining
+        self._record_event("ATTEMPT_SUCCEEDED", execution_id, name, **payload)
         return self._settled(name)
 
     def on_failure(self, execution_id: str, failure_class: FailureClass,
@@ -151,6 +211,7 @@ class Job:
     def _failed(self, name, failure_class, reason) -> list[Launch]:
         """Retry within the class's budget (D09.2), or settle the task."""
         task = self._tasks[name]
+        failed = task.execution_id  # the attempt settled, before any retry
         task.failure_class = failure_class
         task.error = reason
         budget = failure_class.value.lower()
@@ -163,12 +224,28 @@ class Job:
                 task.round += 1  # a new round competes for a new result
             attempt = self._new_attempt(name)
             task.state = State.RETRY_WAIT
+            self._record_event(
+                "ATTEMPT_FAILED", failed, name,
+                state=State.RETRY_WAIT.value,
+                failure_class=failure_class.value,
+                reason=reason, retry_in_s=delay,
+            )
+            self._record_event(
+                "RETRY_SCHEDULED", failed, name,
+                failure_class=failure_class.value, retry_in_s=delay,
+                next_execution_id=attempt.execution_id,
+            )
             return [Launch(attempt, delay)]
         self._record(task, failure_class.value, reason, None)
         if failure_class is FailureClass.TASK:
             task.state = State.FAILED
         else:
             task.state = State.ERROR
+        self._record_event(
+            "ATTEMPT_FAILED", failed, name,
+            state=task.state.value, failure_class=failure_class.value,
+            reason=reason, retry_in_s=None,
+        )
         return self._settled(name)
 
     def _settled(self, name: str) -> list[Launch]:
@@ -196,11 +273,17 @@ class Job:
                 if task.state is State.PENDING:
                     task.state = State.SKIPPED
                     task.error = f"dependency {current!r} did not succeed"
+                    self._record_event(
+                        "TASK_SKIPPED", "", dependent,
+                        state=State.SKIPPED.value, reason=task.error,
+                    )
                     pending.append(dependent)
 
     def _launch(self, name: str) -> Launch:
         attempt = self._new_attempt(name)
         self._tasks[name].state = State.RUNNING
+        self._record_event("TASK_LAUNCHED", attempt.execution_id, name,
+                           state=State.RUNNING.value)
         return Launch(attempt)
 
     def _new_attempt(self, name: str) -> Attempt:
@@ -229,6 +312,16 @@ class Job:
             outputs=task.spec.outputs,
             timeout_s=task.spec.timeout_s,
         )
+
+    def _record_event(self, type: str, execution_id: str, task: str | None,
+                      **payload) -> None:
+        """Append one history event, stamped by the injected clock (D15.6).
+
+        Only `scheduler.py` writes here: every transition records once, so
+        replaying the same calls rebuilds the same feed.
+        """
+        self._events.append(Event(self._clock(), type, self.job_id, task,
+                                  execution_id, payload))
 
     @staticmethod
     def _record(task, outcome, reason, retry_in_s):

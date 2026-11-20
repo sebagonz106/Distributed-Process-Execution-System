@@ -11,6 +11,7 @@ import dataclasses
 import json
 import logging
 import sqlite3
+import time
 
 from dpes.failures import FailureClass
 from dpes.log import event
@@ -33,9 +34,14 @@ CREATE TABLE IF NOT EXISTS events (
     seq INTEGER PRIMARY KEY,
     job TEXT NOT NULL,
     kind TEXT NOT NULL,
-    data TEXT NOT NULL
+    data TEXT NOT NULL,
+    at REAL NOT NULL DEFAULT 0
 )
 """
+# Journals written before D15.16 have no `at`. SQLite only adds a column with a
+# constant default, so those rows come back at the epoch: their time was never
+# recorded and inventing one would be a lie.
+_JOURNAL_ADD_AT = "ALTER TABLE events ADD COLUMN at REAL NOT NULL DEFAULT 0"
 
 
 def _connect(path, schema):
@@ -82,27 +88,37 @@ class ResultLog:
 
 class Journal:
     """The coordinator's calls to its state machine, in the order it made
-    them. Replaying them rebuilds its state (plan/14, D14.1)."""
+    them. Replaying them rebuilds its state (plan/14, D14.1). Each call keeps
+    the wall-clock time it was made, so the events it produces keep theirs
+    across a restart (plan/15, D15.16)."""
 
     def __init__(self, path):
         self._db = _connect(path, _JOURNAL_SCHEMA)
+        columns = {row[1] for row in
+                   self._db.execute("PRAGMA table_info(events)")}
+        if "at" not in columns:  # a journal from before D15.16
+            self._db.execute(_JOURNAL_ADD_AT)
 
-    def append(self, job_id, kind, *args):
-        """Record a call of `kind` with `args`; on disk when it returns."""
+    def append(self, job_id, kind, *args) -> float:
+        """Record a call of `kind` with `args`; on disk when it returns.
+        Returns the time stored with it, so the events of that very call are
+        stamped with it (live and replayed alike)."""
         encode, _ = _CALLS[kind]
+        at = time.time()
         self._db.execute(
-            "INSERT INTO events (job, kind, data) VALUES (?, ?, ?)",
-            (job_id, kind, json.dumps(encode(*args), ensure_ascii=False)),
+            "INSERT INTO events (job, kind, data, at) VALUES (?, ?, ?, ?)",
+            (job_id, kind, json.dumps(encode(*args), ensure_ascii=False), at),
         )
+        return at
 
     def events(self):
-        """(job id, kind, args) of every call, oldest first."""
+        """(job id, kind, args, time) of every call, oldest first."""
         rows = self._db.execute(
-            "SELECT job, kind, data FROM events ORDER BY seq"
+            "SELECT job, kind, data, at FROM events ORDER BY seq"
         ).fetchall()
-        for job_id, kind, data in rows:
+        for job_id, kind, data, at in rows:
             _, decode = _CALLS[kind]
-            yield job_id, kind, decode(json.loads(data))
+            yield job_id, kind, decode(json.loads(data)), at
 
     def close(self):
         self._db.close()
@@ -133,6 +149,10 @@ _CALLS = {
         },
         lambda data: (data["execution_id"],
                       FailureClass(data["failure_class"]), data["reason"]),
+    ),
+    "finished": (  # the job is over; its feed gets JOB_FINISHED (D15.17)
+        lambda: {},
+        lambda data: (),
     ),
 }
 

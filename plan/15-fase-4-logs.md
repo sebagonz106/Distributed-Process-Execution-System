@@ -233,13 +233,14 @@ inactividad).
 | \`ATTEMPT_SUCCEEDED\` | \`on_result()\` con éxito | \`state: "SUCCEEDED", exit_code\` |
 | \`ATTEMPT_FAILED\` | \`on_result()\` fallo tarea / \`on_failure()\` | \`failure_class, reason, retry_in_s\` |
 | \`RETRY_SCHEDULED\` | \`_failed()\` programa reintento | \`failure_class, retry_in_s, next_execution_id\` |
-| \`JOB_FINISHED\` | \`_log_if_finished()\` | \`state: "SUCCEEDED|FAILED|ERROR", counts\` |
+| \`TASK_SKIPPED\` | \`_skip_dependents_of()\` (añadido por D15.17) | \`state: "SKIPPED", reason\` |
+| \`JOB_FINISHED\` | \`Job.finished()\`, llamado por el coordinador | \`state: "SUCCEEDED|FAILED|ERROR", counts\` |
 
-**Persistencia:** Los eventos viven en memoria en \`scheduler.Job._events\` y se reconstruyen al reiniciar el coordinador vía journal (D14.1). El endpoint \`events()\` del actor coordinador lee \`job._events\`.
+**Persistencia:** Los eventos viven en memoria en \`scheduler.Job._events\` y se reconstruyen al reiniciar el coordinador vía journal (D14.1). El endpoint \`events()\` del actor coordinador lee \`job._events\`. D15.16 fija cómo se conserva la hora y D15.17 la forma final del evento.
 
 **Consecuencias:**
 - Los eventos son **datos**, no logs operativos (D10.4). Los módulos puros no logean; el coordinador emite eventos como estructuras de datos.
-- Timestamp en ISO 8601 UTC con milisegundos (generado en el coordinador al emitir).
+- Timestamp en ISO 8601 UTC con milisegundos (generado en el coordinador al emitir, en hora de pared; D15.16).
 - El endpoint es de solo lectura; no requiere idempotency key.
 
 ---
@@ -250,34 +251,40 @@ inactividad).
 
 **Decisión:** Extender \`scheduler.Job\` con lista \`_events\` y método \`_record_event(type, execution_id, **payload)\`.
 
-**Implementación:**
+**Implementación (forma final, refinada por D15.16 a D15.18):**
 ```python
-@dataclass
+@dataclass(frozen=True)
 class Event:
-    timestamp: float      # time.monotonic() — se convierte a ISO en capa HTTP
+    timestamp: float      # hora de pared del reloj inyectado (D15.16)
     type: str
+    job_id: str
+    task: str | None
     execution_id: str
     payload: dict
 
 class Job:
-    def __init__(self, ...):
+    def __init__(self, ..., clock=None):
+        self._clock = clock or _epoch  # el job_id lo pone el propio Job
         self._events = []
+        self._done = False
 
-    def _record_event(self, type: str, execution_id: str, **payload):
-        self._events.append(Event(time.monotonic(), type, execution_id, payload))
+    def _record_event(self, type, execution_id, task, **payload):
+        self._events.append(Event(self._clock(), type, self.job_id, task,
+                                  execution_id, payload))
 
     # Puntos de llamada:
-    # start() / _launch()           -> TASK_LAUNCHED
-    # on_result() success           -> ATTEMPT_SUCCEEDED
-    # on_result() failure (TASK)    -> ATTEMPT_FAILED (failure_class=TASK)
-    # on_failure() (WORKER/NETWORK) -> ATTEMPT_FAILED (failure_class=...)
+    # _launch()                     -> TASK_LAUNCHED (primer intento y siguientes)
+    # on_result() éxito             -> ATTEMPT_SUCCEEDED
+    # _failed()                     -> ATTEMPT_FAILED (con o sin presupuesto)
     # _failed() con reintento       -> RETRY_SCHEDULED
-    # _log_if_finished()            -> JOB_FINISHED
+    # _skip_dependents_of()         -> TASK_SKIPPED por tarea omitida
+    # finished()                    -> JOB_FINISHED (una vez por trabajo)
+    # running()                     -> nada (D15.18)
 ```
 
 **Consecuencias:**
-- \`scheduler.py\` sigue siendo **puro**: no importa \`time\` en producción (inyectado en tests), no escribe disco, no usa Ray.
-- Los tests unitarios verifican: cada transición emite evento correcto, payload completo, orden cronológico.
+- \`scheduler.py\` sigue siendo **puro**: no importa \`time\`, no escribe disco, no usa Ray; el reloj entra por parámetro (D15.16).
+- Los tests unitarios verifican: cada transición emite evento correcto, payload completo, orden de inserción.
 - El coordinador (actor Ray) expone \`events(job_id)\` que devuelve \`job._events\` convertido a JSON serializable.
 
 ---
@@ -340,6 +347,65 @@ class _StoreClient:
 **Decisión:** Confirmar \`RAY_DEDUP_LOGS=0\` en \`docker/compose.yaml\` para el servicio \`head\` (ya está, D10.7). Documentar en D15.1 que el almacén usa su propia secuencia, no la de Ray.
 
 **Verificación:** Test unitario en C1 que comprueba que dos intentos distintos con logs idénticos producen líneas separadas en \`docker logs dpes-head\`.
+
+---
+
+### D15.16 — Reloj de pared inyectado y persistencia de la hora en el diario
+
+**Contexto:** D15.6 propone `time.monotonic()` pero D15.5 pide ISO 8601 UTC; un reloj monótono no se convierte a hora de pared. El diario no guarda timestamps. El reinicio pierde la hora original.
+
+**Decisión:** El coordinador inyecta `clock=time.time` al crear `Job`; el scheduler usa ese reloj (no importa `time`). El diario (`store.Journal`) gana columna `at REAL NOT NULL` con migración `ALTER TABLE events ADD COLUMN at REAL DEFAULT (julianday('now') * 86400000)` al abrir. Los eventos guardan su `at`; el replay los recupera con su hora original.
+
+**Al implementar (2026-11-20):**
+- SQLite solo añade una columna con un valor por defecto **constante**: la
+  expresión `julianday('now')` que decía esta decisión no es aceptable en
+  `ALTER TABLE`. La migración real es
+  `ALTER TABLE events ADD COLUMN at REAL NOT NULL DEFAULT 0`, y las filas
+  escritas antes de esta decisión se repiten con `at = 0` (la época): su hora
+  nunca se registró e inventarla sería mentir. Se detecta con
+  `PRAGMA table_info(events)`, así que abrir un diario ya migrado no cambia
+  nada.
+- El reloj no es «la hora del coordinador» en abstracto: `Journal.append`
+  devuelve el `at` que acaba de guardar y el coordinador fija con él el reloj
+  mientras ejecuta **esa** llamada (`_Clock`, `_journaled`). Así el evento en
+  vivo y el reconstruido son idénticos, no solo parecidos.
+- Consecuencia: todos los eventos que produce una misma llamada comparten el
+  instante (un `on_result` puede desbloquear varios `TASK_LAUNCHED`). El orden
+  del feed es el orden de inserción, no el valor de `timestamp`.
+- El reloj por defecto de `Job` es `_epoch` (`0.0`), no `time.time`: el módulo
+  sigue sin importar `time` y las pruebas que no miden tiempo no dependen del
+  reloj de la máquina.
+
+---
+
+### D15.17 — Forma del evento, JOB_FINISHED diarizado y TASK_SKIPPED
+
+**Contexto:** D15.5 pide `job_id` y `task` en el JSON; D15.6 solo tiene `execution_id`. `JOB_FINISHED` no pertenece a un intento. Faltan eventos para `SKIPPED`.
+
+**Decisión:** `Event` lleva `job_id`, `task` (string|null) y `type` incluye `TASK_SKIPPED`. `JOB_FINISHED` usa `execution_id=""`, `task=null`. Nuevo `kind="finished"` en `_METHODS`/`_CALLS` mapeado a `Job.finished()`, llamado por el coordinador cuando `job.state ∈ _FINISHED` tras `_settle`; se diariza y rejuega en el reinicio.
+
+**Al implementar (2026-11-20):**
+- El `job_id` de cada evento lo pone `Job`, no el llamante: el pseudocódigo de
+  D15.6 lo pedía como parámetro y era repetir un dato que la máquina de estados
+  ya tiene. Mismo contrato, menos superficie para equivocarse.
+- `Job.finished()` es idempotente (`done`), y el coordinador pregunta `job.done`
+  antes de diarizar: el replay no puede añadir un segundo final.
+- Ventana de caída cerrada: si el coordinador muere entre la fila `result` y la
+  fila `finished`, al reiniciar el trabajo ya está terminado y nadie volvería a
+  llamar a `Job.finished()`. El constructor recorre los trabajos terminados sin
+  final y lo diariza entonces; es el único caso en que un `at` es la hora del
+  reinicio, porque el original nunca se escribió.
+- El método `events(job_id)` del actor se adelantó al Commit 5: sin un lector,
+  el criterio «los eventos sobreviven al reinicio» no se puede probar. El
+  Commit 6 solo añade el endpoint HTTP y el cliente de la pasarela.
+
+---
+
+### D15.18 — TASK_LAUNCHED en la decisión, no en el arranque real
+
+**Contexto:** `_launch` decide; `running()` arranca de verdad tras `retry_in_s`. Un solo tipo pierde la distinción.
+
+**Decisión:** `TASK_LAUNCHED` se emite en `_launch`/`start` (cuando la máquina de estados decide lanzar). El arranque real de un reintento no genera evento aparte (el `RETRY_SCHEDULED` ya dijo cuándo se esperaba). Así el feed muestra "programado → espera → éxito/fallo" sin duplicados.
 
 ---
 
@@ -576,8 +642,9 @@ cliente que se va, y un cliente que abre y cierra conexiones agota los hilos de
 | LogStore (actor) | Gateway | \`read_fragments(eid, offset, limit) -> [(seq, bytes)]\` | Offset en bytes |
 | LogStore (actor) | Gateway | \`log_size(eid) -> int\` | Bytes de salida (D15.15) |
 | LogStore (actor) | Gateway | \`tail_fragments(eid, offset) -> AsyncIterator[(seq, bytes)]\` | Para streaming |
-| Scheduler (núcleo) | Coordinador (actor) | \`job._events -> List[Event]\` | Datos puros, sin Ray |
-| Coordinador (actor) | Gateway | \`events(job_id) -> List[Event]\` | Serializado a JSON |
+| Scheduler (núcleo) | Coordinador (actor) | \`job.events() -> List[Event]\` | Datos puros, sin Ray; reloj inyectado (D15.16) |
+| Coordinador (actor) | Gateway | \`events(job_id) -> list[dict] | None\` | \`None\` si el trabajo no existe; JSON listo |
+| Coordinador (actor) | Journal (SQLite) | \`append(job, kind, *args) -> at\` / \`events() -> (job, kind, args, at)\` | La hora de cada llamada (D15.16) |
 | Gateway | Cliente CLI | HTTP \`GET /logs?offset=&limit=\` / \`?follow=1\` | text/plain, chunked |
 
 ---
@@ -591,7 +658,7 @@ cliente que se va, y un cliente que abre y cierra conexiones agota los hilos de
 | \`test_events_shows_history\` | \`GET /events\` devuelve transiciones, clases, esperas | E2E |
 | \`test_offset_resumption\` | \`logs -o N\` retoma exactamente en byte N | E2E |
 | \`test_duplicate_fragment_ignored\` | LogStore ignora seq duplicado | Unit |
-| \`test_scheduler_emits_all_events\` | Cada transición genera Event correcto | Unit |
+| \`EventsTest\` | Cada transición genera el Event correcto (Commit 5) | Unit |
 | \`test_gateway_streaming_cleanup\` | Desconexión cliente limpia suscripción tail | Integration |
 
 ---
@@ -785,7 +852,86 @@ permite cancelar el generador remoto al cerrar el del llamante, de ahí el tope.
   `Range: bytes=18-` → 416 con `bytes */18`; una tarea desconocida → 404;
   `offset=x` → 400; `Range` junto a `offset` → 400.
 
-**Siguiente:** Commit 5 (la API de historial de eventos, D15.5).
+**Siguiente:** Commit 5 (la emisión de eventos del scheduler, D15.6, D15.16 y D15.17).
+
+---
+
+### Commit 5 — el scheduler emite eventos y el diario guarda su hora (2026-11-20)
+
+**Qué hay:**
+
+- `dpes/scheduler.py`: `Event` (inmutable) con `timestamp`, `type`, `job_id`,
+  `task`, `execution_id` y `payload`; `Job._events`, `Job.events()`, `Job.done`,
+  `Job.finished()` y `_record_event(type, execution_id, task, **payload)`. El
+  módulo sigue sin `import time`: el reloj entra por `clock=` (D15.16) y sin él
+  los eventos se sellan en `0.0`.
+- Puntos de emisión (D15.5, D15.18): `_launch` → `TASK_LAUNCHED` (primer intento
+  y los que desbloquea una dependencia); `on_result` con éxito →
+  `ATTEMPT_SUCCEEDED` (`state`, `exit_code`, `note` si la hubo); `_failed` →
+  `ATTEMPT_FAILED` siempre (`state`, `failure_class`, `reason`, `retry_in_s`) y,
+  si queda presupuesto, `RETRY_SCHEDULED` (`failure_class`, `retry_in_s`,
+  `next_execution_id`), las dos con el intento que falló para poder enlazarlas;
+  `_skip_dependents_of` → `TASK_SKIPPED` por tarea omitida (`execution_id=""`);
+  `finished()` → `JOB_FINISHED` una sola vez (`task=None`, `execution_id=""`,
+  `counts` por estado de tarea). `running()` no emite nada: el reintento ya se
+  anunció al programarse.
+- `dpes/store.py`: `Journal` gana `at REAL NOT NULL DEFAULT 0`; `append`
+  devuelve la hora que guarda y `events()` devuelve
+  `(job, kind, args, at)`. La migración es idempotente y se decide con
+  `PRAGMA table_info(events)` (D15.16).
+- `dpes/coordinator.py`: `_Clock` es el reloj de pared que el `Job` recibe;
+  mientras corre una llamada diarizada devuelve el `at` de esa fila
+  (`_journaled`), tanto en vivo como en el replay, así que el evento
+  reconstruido es idéntico al original. `_METHODS`/`_CALLS` ganan `finished`.
+  `_log_if_finished` diariza el final antes de registrarlo, y el constructor
+  cierra los trabajos que el replay deja terminados sin fila `finished`
+  (D15.17). El actor expone `events(job_id)`, que devuelve `None` si el trabajo
+  no existe.
+
+**Pruebas:**
+
+| Lo que se afirma | Test que lo evidencia | Nivel |
+|------------------|-----------------------|-------|
+| Cada transición deja su evento con el esquema completo | `EventsTest.test_starting_a_task_leaves_one_launch_event`, `test_a_success_records_the_attempt_and_its_exit_code`, `test_a_worker_failure_keeps_its_class_and_reason` | Unit |
+| El reloj inyectado sella los eventos | `test_events_follow_the_injected_clock` | Unit |
+| Un resultado adoptado se explica en el evento | `test_an_adopted_result_says_so` | Unit |
+| Un fallo de tarea sin presupuesto es un solo `ATTEMPT_FAILED` | `test_a_task_failure_out_of_budget_is_one_failed_event` | Unit |
+| Un reintento es `ATTEMPT_FAILED` + `RETRY_SCHEDULED` enlazados | `test_a_retry_is_a_failure_then_a_scheduled_retry` | Unit |
+| Las tareas omitidas dejan `TASK_SKIPPED` sin intento | `test_skipping_a_dependent_leaves_an_event_without_an_attempt` | Unit |
+| `JOB_FINISHED` aparece una vez, con recuentos | `test_the_end_of_a_job_is_recorded_once_with_the_task_counts` | Unit |
+| Repetir las llamadas con las mismas horas reconstruye el mismo feed | `test_replaying_the_same_calls_rebuilds_the_same_feed` | Unit |
+| El feed es JSON puro con las claves del esquema | `test_the_feed_is_plain_json` | Unit |
+| El diario devuelve cada llamada con su hora, también al reabrir | `JournalTest.test_each_call_keeps_the_wall_clock_time_it_was_made`, `test_that_time_survives_reopening` | Unit |
+| Un diario anterior a D15.16 se migra sin perder llamadas | `JournalMigrationTest.test_rows_without_a_time_gain_the_column_and_keep_their_data`, `test_new_rows_of_a_migrated_journal_keep_their_time` | Unit |
+| Un trabajo desconocido no tiene feed | `CoordinatorTest.test_an_unknown_job_has_no_events` | Integration |
+| El feed real enseña fallo, espera y reintento | `RetryTest.test_the_feed_shows_the_failure_the_retry_and_the_end` | Integration |
+| El feed de un trabajo terminado sobrevive al reinicio con sus horas | `RecoveryTest.test_the_feed_of_a_finished_job_survives_unchanged` | Integration |
+| Una caída entre `result` y `finished` no deja el feed sin final | `ReplayedJournalTest.test_a_job_that_finished_just_before_a_crash_records_its_end` | Integration |
+
+**Verificación (2026-11-20, clúster de tres nodos):**
+
+- `py -W error -m unittest discover -s tests/unit` → 244 pruebas OK (2 saltadas
+  por ser de Linux).
+- En el nodo de control, `python -W error -m unittest discover -s tests/unit` →
+  292 pruebas OK (sin saltos).
+- `tests/integration` → 35 pruebas OK; `tests/e2e` → 23 pruebas OK.
+- `py -m unittest discover -s tests/host` → 8 pruebas OK. En dos pasadas
+  inmediatas a un `up -d --build` falló `test_every_process_describes_its_part_of_the_job`:
+  Ray reenvía la salida de los workers de forma asíncrona y la prueba deja de
+  esperar en cuanto ve `job finished` (línea del coordinador), antes de que
+  lleguen las del ejecutor del primer intento. Es una carrera conocida de esa
+  prueba del espacio anfitrión (pista B), no de este cambio: sin tocar código,
+  la pasada siguiente volvió a verde.
+- Migración sobre el volumen real: `PRAGMA table_info(events)` del diario que ya
+  existía en `/var/lib/dpes` lista `at`; las 930 filas anteriores quedaron en
+  `0.0` y las nuevas traen hora.
+- Comprobación fuera de las pruebas: un DAG de tres tareas produjo siete
+  eventos en orden (`TASK_LAUNCHED` ×3, `ATTEMPT_SUCCEEDED` ×3 y
+  `JOB_FINISHED` con `counts: {"succeeded": 3}`); se mató el coordinador y el
+  feed volvió **idéntico**, con los mismos flotantes.
+
+**Siguiente:** Commit 6 (el endpoint `GET /jobs/{id}/events`), que solo añade el
+transporte HTTP y `_Client.events`.
 
 ---
 

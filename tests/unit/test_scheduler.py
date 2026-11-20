@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import unittest
 
@@ -15,9 +16,9 @@ def task_spec(needs=(), retries=None):
                     retries=retries or dict(NO_RETRIES))
 
 
-def make_job(*names, retries=None, rand=0.5):
+def make_job(*names, retries=None, rand=0.5, clock=None):
     tasks = {name: task_spec(retries=retries) for name in names or ("hello",)}
-    return Job("job-1", JobSpec(tasks), rand=lambda: rand)
+    return Job("job-1", JobSpec(tasks), rand=lambda: rand, clock=clock)
 
 
 def result(execution_id, exit_code=0, timed_out=False, output_tail=""):
@@ -444,6 +445,162 @@ class ArtifactFlowTest(unittest.TestCase):
         self.assertEqual(("app",), link.outputs)
         self.assertEqual({"a.o": "sha256:o"},
                          job.view()["tasks"]["compile"]["outputs"])
+
+
+class EventsTest(unittest.TestCase):
+    """Every transition leaves one event for clients (plan/15, D15.5)."""
+
+    def setUp(self):
+        self.now = 0.0
+        self.job = make_job(clock=self.clock)
+
+    def clock(self):
+        self.now += 1.0
+        return self.now
+
+    def start(self):
+        return only(self.job.start()).attempt.execution_id
+
+    def test_starting_a_task_leaves_one_launch_event(self):
+        eid = self.start()
+
+        (event,) = self.job.events()
+        self.assertEqual(
+            ("TASK_LAUNCHED", "job-1", "hello", eid, {"state": "RUNNING"}),
+            (event.type, event.job_id, event.task, event.execution_id,
+             event.payload),
+        )
+
+    def test_events_follow_the_injected_clock(self):
+        eid = self.start()
+        self.job.on_result(result(eid))
+
+        self.assertEqual([1.0, 2.0], [e.timestamp for e in self.job.events()])
+
+    def test_a_success_records_the_attempt_and_its_exit_code(self):
+        eid = self.start()
+
+        self.job.on_result(result(eid, output_tail="hi\n"))
+
+        event = self.job.events()[-1]
+        self.assertEqual("ATTEMPT_SUCCEEDED", event.type)
+        self.assertEqual(eid, event.execution_id)
+        self.assertEqual("hello", event.task)
+        self.assertEqual({"state": "SUCCEEDED", "exit_code": 0}, event.payload)
+
+    def test_an_adopted_result_says_so(self):
+        eid = self.start()
+        note = "adopted by reconciliation after WorkerCrashedError"
+
+        self.job.on_result(result("job-1/hello/0/0"), eid, note)
+
+        self.assertEqual(note, self.job.events()[-1].payload["note"])
+
+    def test_a_task_failure_out_of_budget_is_one_failed_event(self):
+        eid = self.start()
+
+        self.job.on_result(result(eid, exit_code=2))
+
+        (event,) = self.job.events()[1:]
+        self.assertEqual(("ATTEMPT_FAILED", "FAILED"),
+                         (event.type, event.payload["state"]))
+        self.assertEqual(
+            ("TASK", "exit code 2", None),
+            (event.payload["failure_class"], event.payload["reason"],
+             event.payload["retry_in_s"]),
+        )
+
+    def test_a_worker_failure_keeps_its_class_and_reason(self):
+        eid = self.start()
+
+        self.job.on_failure(eid, WORKER, "WorkerCrashedError")
+
+        event = self.job.events()[-1]
+        self.assertEqual("ATTEMPT_FAILED", event.type)
+        self.assertEqual(
+            ("WORKER", "WorkerCrashedError"),
+            (event.payload["failure_class"], event.payload["reason"]),
+        )
+
+    def test_a_retry_is_a_failure_then_a_scheduled_retry(self):
+        job = make_job(retries={**NO_RETRIES, "worker": 1}, clock=self.clock)
+        eid = only(job.start()).attempt.execution_id
+
+        retry = only(job.on_failure(eid, WORKER, "NodeDiedError"))
+
+        failed, scheduled = job.events()[1:]
+        self.assertEqual(["ATTEMPT_FAILED", "RETRY_SCHEDULED"],
+                         [failed.type, scheduled.type])
+        self.assertEqual((eid, eid),
+                         (failed.execution_id, scheduled.execution_id))
+        self.assertEqual(
+            (retry.attempt.execution_id, 0.0),
+            (scheduled.payload["next_execution_id"],
+             scheduled.payload["retry_in_s"]),
+        )
+
+    def test_skipping_a_dependent_leaves_an_event_without_an_attempt(self):
+        job = dag_job(a=[], b=["a"], c=["b"])
+        eid = {l.attempt.task: l.attempt.execution_id for l in job.start()}
+
+        job.on_failure(eid["a"], WORKER, "lost")
+
+        skipped = [e for e in job.events() if e.type == "TASK_SKIPPED"]
+        self.assertEqual(["b", "c"], [e.task for e in skipped])
+        self.assertEqual(["", ""], [e.execution_id for e in skipped])
+        self.assertEqual({"state": "SKIPPED",
+                          "reason": "dependency 'a' did not succeed"},
+                         skipped[0].payload)
+
+    def test_the_end_of_a_job_is_recorded_once_with_the_task_counts(self):
+        eid = self.start()
+        self.job.on_result(result(eid))
+
+        self.job.finished()
+        self.job.finished()  # a repeat must not add a second end
+
+        (end,) = [e for e in self.job.events() if e.type == "JOB_FINISHED"]
+        self.assertEqual(("", None), (end.execution_id, end.task))
+        self.assertEqual({"state": "SUCCEEDED", "counts": {"succeeded": 1}},
+                         end.payload)
+        self.assertTrue(self.job.done)
+
+    def test_replaying_the_same_calls_rebuilds_the_same_feed(self):
+        def play():
+            ticks = iter([10.0, 11.0, 12.0, 13.0, 14.0])
+            job = make_job(retries={**NO_RETRIES, "worker": 1},
+                           clock=lambda: next(ticks))
+            eid = only(job.start()).attempt.execution_id
+            retry = only(job.on_failure(eid, WORKER, "lost"))
+            job.on_result(result(retry.attempt.execution_id))
+            job.finished()
+            return [dataclasses.asdict(e) for e in job.events()]
+
+        first = play()
+
+        self.assertEqual(first, play())
+        self.assertEqual(
+            ["TASK_LAUNCHED", "ATTEMPT_FAILED", "RETRY_SCHEDULED",
+             "ATTEMPT_SUCCEEDED", "JOB_FINISHED"],
+            [e["type"] for e in first],
+        )
+
+    def test_the_feed_is_plain_json(self):
+        eid = self.start()
+        self.job.on_result(result(eid))
+        self.job.finished()
+
+        feed = json.loads(json.dumps([dataclasses.asdict(e)
+                                      for e in self.job.events()]))
+
+        self.assertEqual(["TASK_LAUNCHED", "ATTEMPT_SUCCEEDED",
+                          "JOB_FINISHED"],
+                         [e["type"] for e in feed])
+        self.assertEqual({"timestamp", "type", "job_id", "task",
+                          "execution_id", "payload"},
+                         set(feed[0]))
+        self.assertEqual(["hello", "hello", None],
+                         [e["task"] for e in feed])
 
 
 if __name__ == "__main__":

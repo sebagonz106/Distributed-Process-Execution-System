@@ -1,5 +1,7 @@
 import os
+import sqlite3
 import tempfile
+import time
 import unittest
 
 from dpes.failures import FailureClass
@@ -142,6 +144,12 @@ class JournalTest(unittest.TestCase):
         self.addCleanup(journal.close)
         return journal
 
+    def calls(self, journal=None):
+        """What each row says, without its time."""
+        source = journal or self.journal
+        return [(job_id, kind, args)
+                for job_id, kind, args, _ in source.events()]
+
     def test_each_kind_of_call_comes_back_as_it_went_in(self):
         calls = [
             ("job-1", "accepted", (SPEC, "key-1")),
@@ -150,16 +158,17 @@ class JournalTest(unittest.TestCase):
              (result("job-1/compile/0/1"), "job-1/compile/0/1", "a note")),
             ("job-1", "failure",
              ("job-1/link/0/1", FailureClass.WORKER, "coordinator restart")),
+            ("job-1", "finished", ()),
         ]
         for job_id, kind, args in calls:
             self.journal.append(job_id, kind, *args)
 
-        self.assertEqual(calls, list(self.journal.events()))
+        self.assertEqual(calls, self.calls())
 
     def test_a_job_sent_without_a_key_keeps_none(self):
         self.journal.append("job-1", "accepted", SPEC, None)
 
-        ((_, _, (_, key)),) = self.journal.events()
+        ((_, _, (_, key), _),) = self.journal.events()
 
         self.assertIsNone(key)
 
@@ -171,8 +180,72 @@ class JournalTest(unittest.TestCase):
         self.assertEqual(
             [("job-1", "running", ("a",)), ("job-2", "running", ("b",)),
              ("job-1", "running", ("c",))],
-            list(self.open().events()),
+            self.calls(self.open()),
         )
+
+    def test_each_call_keeps_the_wall_clock_time_it_was_made(self):
+        before = time.time()
+
+        at = self.journal.append("job-1", "running", "a")
+
+        after = time.time()
+        ((_, _, _, recorded),) = self.journal.events()
+        self.assertEqual(at, recorded)
+        self.assertLessEqual(before, at)
+        self.assertLessEqual(at, after)
+
+    def test_that_time_survives_reopening(self):
+        at = self.journal.append("job-1", "running", "a")
+        self.journal.close()
+
+        ((_, _, _, recorded),) = self.open().events()
+
+        self.assertEqual(at, recorded)
+
+
+class JournalMigrationTest(unittest.TestCase):
+    """A journal written before D15.16 opens and keeps its calls."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.path = os.path.join(directory.name, "coordinator.sqlite")
+
+    def test_rows_without_a_time_gain_the_column_and_keep_their_data(self):
+        # The schema as it was before D15.16, with one row already in it.
+        old = sqlite3.connect(self.path)
+        old.execute(
+            "CREATE TABLE events (seq INTEGER PRIMARY KEY, job TEXT NOT NULL, "
+            "kind TEXT NOT NULL, data TEXT NOT NULL)"
+        )
+        old.execute("INSERT INTO events (job, kind, data) VALUES (?, ?, ?)",
+                    ("job-1", "running", '{"execution_id": "a"}'))
+        old.commit()
+        old.close()
+
+        journal = Journal(self.path)
+        self.addCleanup(journal.close)
+
+        ((job_id, kind, args, at),) = journal.events()
+        self.assertEqual(("job-1", "running", ("a",)), (job_id, kind, args))
+        # Their time was never recorded: the epoch says so, it does not lie.
+        self.assertEqual(0.0, at)
+
+    def test_new_rows_of_a_migrated_journal_keep_their_time(self):
+        old = sqlite3.connect(self.path)
+        old.execute(
+            "CREATE TABLE events (seq INTEGER PRIMARY KEY, job TEXT NOT NULL, "
+            "kind TEXT NOT NULL, data TEXT NOT NULL)"
+        )
+        old.commit()
+        old.close()
+        journal = Journal(self.path)
+        self.addCleanup(journal.close)
+
+        at = journal.append("job-1", "running", "a")
+
+        ((_, _, _, recorded),) = journal.events()
+        self.assertEqual(at, recorded)
 
 
 if __name__ == "__main__":

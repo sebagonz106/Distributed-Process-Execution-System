@@ -16,8 +16,9 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from dpes.coordinator import BlobStore, Coordinator, LogStore, _Client
 from dpes.hashing import digest
-from dpes.messages import ResultKey
+from dpes.messages import ResultKey, TaskResult
 from dpes.spec import SpecError, parse_job
+from dpes.store import Journal
 
 
 def stand_in_executor(attempt, store):
@@ -76,6 +77,7 @@ class CoordinatorTestCase(unittest.TestCase):
         here = NodeAffinitySchedulingStrategy(
             ray.get_runtime_context().get_node_id(), soft=False
         )
+        cls.here = here
         cls.store = BlobStore.options(scheduling_strategy=here).remote(
             os.path.join(folder, "blobs"),
             os.path.join(folder, "results.sqlite"),
@@ -95,6 +97,9 @@ class CoordinatorTestCase(unittest.TestCase):
 
     def status(self, job_id):
         return ray.get(self.coordinator.status.remote(job_id), timeout=10)
+
+    def events(self, job_id):
+        return ray.get(self.coordinator.events.remote(job_id), timeout=10)
 
     def submit(self, spec):
         return ray.get(self.coordinator.submit.remote(spec))
@@ -154,6 +159,9 @@ class CoordinatorTest(CoordinatorTestCase):
 
     def test_an_unknown_job_has_no_status(self):
         self.assertIsNone(self.status("no-such-job"))
+
+    def test_an_unknown_job_has_no_events(self):
+        self.assertIsNone(self.events("no-such-job"))
 
     def test_a_dag_runs_every_task_once_its_dependencies_succeed(self):
         view = self.run_job(job(
@@ -215,6 +223,22 @@ class RetryTest(CoordinatorTestCase):
         self.assertEqual(["WORKER", "SUCCEEDED"],
                          [a["outcome"] for a in attempts])
         self.assertEqual(0.0, attempts[0]["retry_in_s"])
+
+    def test_the_feed_shows_the_failure_the_retry_and_the_end(self):
+        view = self.run_one("die-once")
+
+        events = self.events(view["job_id"])
+
+        self.assertEqual(
+            ["TASK_LAUNCHED", "ATTEMPT_FAILED", "RETRY_SCHEDULED",
+             "ATTEMPT_SUCCEEDED", "JOB_FINISHED"],
+            [e["type"] for e in events],
+        )
+        self.assertEqual("WORKER", events[1]["payload"]["failure_class"])
+        self.assertEqual(events[3]["execution_id"],
+                         events[2]["payload"]["next_execution_id"])
+        self.assertEqual(f"{view['job_id']}/t/0/2",
+                         events[3]["execution_id"])
 
     def test_an_attempt_silent_past_its_deadline_is_a_network_failure(self):
         started = time.monotonic()
@@ -362,6 +386,48 @@ class RecoveryTest(CoordinatorTestCase):
         self.assertEqual(before, self.status(done))
         self.assertEqual(
             done, ray.get(self.coordinator.submit.remote(spec, "kept-key")))
+
+    def test_the_feed_of_a_finished_job_survives_unchanged(self):
+        job_id = self.submit(job(t={"command": ["0"]}))
+        self.finished(job_id)
+        before = self.events(job_id)
+        self.assertEqual(["TASK_LAUNCHED", "ATTEMPT_SUCCEEDED",
+                          "JOB_FINISHED"],
+                         [e["type"] for e in before])
+
+        self.finished(
+            self.kill_while_running(job(t={"command": ["hang-once"]})))
+
+        self.assertEqual(before, self.events(job_id))
+
+
+class ReplayedJournalTest(CoordinatorTestCase):
+    """A restart that finds a journal whose last call had no successor."""
+
+    def actor(self, path):
+        actor = Coordinator.options(scheduling_strategy=self.here).remote(
+            stand_in_executor, self.store, self.logs, path
+        )
+        self.addCleanup(ray.kill, actor)
+        return actor
+
+    def test_a_job_that_finished_just_before_a_crash_records_its_end(self):
+        folder = tempfile.mkdtemp(prefix="dpes-journal-")
+        path = os.path.join(folder, "coordinator.sqlite")
+        journal = Journal(path)
+        journal.append("j1", "accepted", job(t={"command": ["0"]}), None)
+        journal.append("j1", "running", "j1/t/0/1")
+        journal.append("j1", "result", TaskResult("j1/t/0/1", 0, False, {}),
+                       "j1/t/0/1", "")
+        journal.close()  # the crash lands before the `finished` call
+
+        feed = ray.get(self.actor(path).events.remote("j1"), timeout=10)
+
+        # The job is over, so its feed must end where it did (D15.17), even
+        # though the previous instance never got to journal the end.
+        self.assertEqual(["TASK_LAUNCHED", "ATTEMPT_SUCCEEDED",
+                          "JOB_FINISHED"],
+                         [e["type"] for e in feed])
 
 
 if __name__ == "__main__":
