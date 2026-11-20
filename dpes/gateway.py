@@ -1,14 +1,20 @@
 """HTTP gateway: validates jobs at the trust boundary, forwards them.
 
-It knows nothing about Ray: it talks to any object with `submit(spec)` and
-`status(job_id)` (plan/07, D07.9). Run on the control node with
-`python -m dpes.gateway`.
+Talks to any object with `submit(spec)`, `status(job_id)` and the log calls 
+(`read_fragments`, `tail_fragments`, `log_size`) (plan/07, D07.9; plan/15, D15.15). 
+Run on the control node with 
+    `python -m dpes.gateway`.
 """
 
 import json
 import logging
+import queue
 import re
+import select
+import socket
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from dpes.hashing import digest
 from dpes.log import event, setup
@@ -17,8 +23,11 @@ from dpes.spec import SpecError, parse_job
 MAX_BODY = 1 << 20  # checked before reading, so a client cannot exhaust memory
 MAX_BLOB = 16 << 20  # blobs travel whole in memory (plan/11, D11.5)
 PORT = 8000
+FOLLOW_POLL_S = 0.5  # how often a follower checks its client is still there
 _JOB_PATH = re.compile(r"/jobs/([^/]+)")
+_LOG_PATH = re.compile(r"/jobs/([^/]+)/tasks/([^/]+)/logs")
 _BLOB_PATH = re.compile(r"/blobs/(sha256:[0-9a-f]{64})")
+_RANGE = re.compile(r"bytes=(\d*)-(\d*)")
 _KEY = re.compile(r"[A-Za-z0-9_-]{1,64}")  # idempotency key (plan/12, D12.7)
 # Not __name__: run with `python -m`, this module is "__main__", outside the
 # "dpes" logger tree that setup() configures, and every line would be lost.
@@ -32,6 +41,10 @@ def make_server(coordinator, host: str, port: int) -> ThreadingHTTPServer:
 
 
 class _Handler(BaseHTTPRequestHandler):
+    # Chunked is defined for 1.1; every answer closes, so no kept-alive
+    # connection can carry the body of a request this handler refused unread.
+    protocol_version = "HTTP/1.1"
+
     def do_POST(self):
         if self.path != "/jobs":
             return self._send(404, {"error": "not found"})
@@ -84,10 +97,14 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(201, {"digest": match[1]})
 
     def do_GET(self):
-        blob = _BLOB_PATH.fullmatch(self.path)
+        path = urlsplit(self.path).path  # the query string carries the offsets
+        blob = _BLOB_PATH.fullmatch(path)
         if blob:
             return self._serve_blob(blob[1])
-        match = _JOB_PATH.fullmatch(self.path)
+        logs = _LOG_PATH.fullmatch(path)
+        if logs:
+            return self._serve_logs(unquote(logs[1]), unquote(logs[2]))
+        match = _JOB_PATH.fullmatch(path)
         if not match:
             return self._send(404, {"error": "not found"})
         try:
@@ -109,37 +126,225 @@ class _Handler(BaseHTTPRequestHandler):
         if data is None:
             return self._send(404, {"error": "unknown blob"})
         event(_log, logging.INFO, "blob served", digest=name, bytes=len(data))
-        self.send_response(200)
-        self.send_header("Content-Type", "application/octet-stream")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
+        self._start(200, "application/octet-stream", len(data))
         self.wfile.write(data)
+
+    def _serve_logs(self, job_id, task):
+        """The log of the task's current attempt: by offset, or as it grows."""
+        try:
+            return self._answer_logs(job_id, task)
+        except OSError as error:  # the client left before its body was out
+            event(_log, logging.WARNING, "log cut short", job=job_id,
+                  error=f"{type(error).__name__}: {error}")
+        except Exception as error:  # whatever broke, the gateway stays up
+            return self._unavailable(error)
+
+    def _answer_logs(self, job_id, task):
+        view = self.server.coordinator.status(job_id)
+        if view is None:
+            return self._send(404, {"error": "unknown job"})
+        task_view = view["tasks"].get(task)
+        if task_view is None:
+            return self._send(404, {"error": "unknown task"})
+        execution_id = task_view["execution_id"]
+        if execution_id is None:
+            return self._send(404, {"error": "the task has not run"})
+        try:
+            offset, limit, follow, ranged = _log_request(
+                parse_qs(urlsplit(self.path).query), self.headers
+            )
+        except ValueError as error:
+            return self._refuse(400, str(error))
+        if follow:
+            return self._follow(execution_id, offset)
+        size = None
+        if ranged:
+            size = self.server.coordinator.log_size(execution_id)
+            if offset >= size:
+                return self._refuse(
+                    416, f"range beyond the {size}-byte log",
+                    (("Content-Range", f"bytes */{size}"),),
+                )
+        pieces = self.server.coordinator.read_fragments(
+            execution_id, offset, limit)
+        data = b"".join(piece for _, piece in pieces)
+        extra = ()
+        if ranged:
+            last = offset + len(data) - 1
+            extra = (("Content-Range", f"bytes {offset}-{last}/{size}"),)
+        self._start(206 if ranged else 200, "text/plain; charset=utf-8",
+                    len(data), extra)
+        self.wfile.write(data)
+        event(_log, logging.INFO, "logs served", execution=execution_id,
+              offset=offset, bytes=len(data),
+              **({"limit": limit} if limit is not None else {}))
+
+    def _follow(self, execution_id, offset):
+        """Stream the log as it grows, one chunk per fragment (D15.4).
+
+        Ends when the attempt closes its log, when the idle limit passes in the
+        store, or when the client leaves: the tail runs on its own thread so a
+        quiet attempt cannot hold this handler for minutes (D15.15)."""
+        reader = _Reader(self.server.coordinator.tail_fragments(
+            execution_id, offset))
+        sent, stopped, fault = 0, "end", None
+        try:
+            self._start(200, "text/plain; charset=utf-8", None,
+                        (("Transfer-Encoding", "chunked"),))
+            while True:
+                try:
+                    data = reader.get(timeout=FOLLOW_POLL_S)
+                except queue.Empty:
+                    if self._client_gone():
+                        stopped = "client"
+                        return
+                    continue
+                if data is None:  # the log ended: nothing more will come
+                    break
+                if data:  # never an empty chunk: it would end the body
+                    self._chunk(data)
+                    sent += len(data)
+            self.wfile.write(b"0\r\n\r\n")  # the last chunk ends the body
+        except (BrokenPipeError, ConnectionResetError):
+            stopped = "client"  # it left while a fragment was being written
+        except Exception as error:  # the store, or the socket, failed under us
+            stopped, fault = "error", f"{type(error).__name__}: {error}"
+        finally:
+            fields = {"execution": execution_id, "offset": offset,
+                      "bytes": sent, "stopped": stopped}
+            if fault:
+                event(_log, logging.WARNING, "log cut off", error=fault,
+                      **fields)
+            else:
+                event(_log, logging.INFO, "log followed", **fields)
+
+    def _client_gone(self):
+        """Whether the client closed a stream that has nothing to write."""
+        try:
+            readable, _, _ = select.select([self.connection], [], [], 0)
+            return bool(readable) and not self.connection.recv(
+                1, socket.MSG_PEEK)
+        except OSError:  # reset by the peer: nothing left to write to
+            return True
+
+    def _chunk(self, data):
+        """One chunk of a chunked body."""
+        self.wfile.write(f"{len(data):x}\r\n".encode() + data + b"\r\n")
 
     def _reject(self, errors):
         event(_log, logging.WARNING, "job rejected", errors=len(errors),
               first=errors[0])
         self._send(400, {"errors": errors})
 
-    def _refuse(self, code, reason):
+    def _refuse(self, code, reason, extra=()):
         event(_log, logging.WARNING, "request refused", status=code,
               reason=reason)
-        self._send(code, {"error": reason})
+        self._send(code, {"error": reason}, extra)
 
     def _unavailable(self, error):
         event(_log, logging.ERROR, "coordinator unavailable",
               error=f"{type(error).__name__}: {error}")
         self._send(503, {"error": f"coordinator unavailable: {error}"})
 
-    def _send(self, code, body):
+    def _send(self, code, body, extra=()):
         data = json.dumps(body).encode()
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
+        self._start(code, "application/json", len(data), extra)
         self.wfile.write(data)
+
+    def _start(self, code, content_type, length=None, extra=()):
+        """Begin a response. `keep-alive` is never used (D15.15), and a
+        missing length means chunked, which the caller writes itself."""
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        for name, value in extra:
+            self.send_header(name, value)
+        if length is not None:
+            self.send_header("Content-Length", str(length))
+        self.send_header("Connection", "close")
+        self.end_headers()
 
     def log_message(self, *args):
         pass  # replaced by the descriptive lines above (plan/10)
+
+
+class _Reader:
+    """A log tail read on its own thread, so this handler can notice that its
+    client left while the attempt says nothing (D15.15). Ray cannot cancel a
+    remote generator, so a tail already running ends on its own (D15.4); what
+    this frees is the handler's thread, which would otherwise wait for the next
+    fragment."""
+
+    def __init__(self, stream):
+        self._stream = stream
+        self._pieces = queue.Queue()
+        threading.Thread(target=self._read, daemon=True,
+                         name="dpes-tail").start()
+
+    def _read(self):
+        try:
+            for _, data in self._stream:
+                self._pieces.put(data)
+        except Exception as error:  # the store or the way to it failed
+            self._pieces.put(error)
+        finally:
+            self._pieces.put(None)  # the tail ended, well or badly
+
+    def get(self, timeout):
+        """The next fragment's bytes, None once the log ended, or timeout."""
+        item = self._pieces.get(timeout=timeout)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+def _log_request(query, headers):
+    """(offset, limit, follow, ranged): what a log request asks for.
+
+    `Range` and the query parameters are two ways to say the same bytes, so a
+    request that mixes them is a mistake worth reporting (D15.15)."""
+    offset = _whole(query, "offset", 0)
+    limit = _whole(query, "limit", None)
+    follow = query.get("follow", ["0"])[-1]
+    if follow not in ("0", "1"):
+        raise ValueError("follow: 0 or 1")
+    range_header = headers.get("Range")
+    if range_header is None:
+        return offset, limit, follow == "1", False
+    if follow == "1":
+        raise ValueError("Range: not with follow")
+    if "offset" in query or "limit" in query:
+        raise ValueError("Range: not with offset or limit")
+    start, last = _range(range_header)
+    if start is None:  # not a byte range this server serves: the whole log
+        return offset, limit, False, False
+    return start, None if last is None else last - start + 1, False, True
+
+
+def _whole(query, name, default):
+    """A whole number from the query string, or `default` when absent."""
+    values = query.get(name)
+    if not values:
+        return default
+    text = values[-1]
+    # ASCII only: `int` does not read every character `isdigit` accepts.
+    if not text.isascii() or not text.isdigit():
+        raise ValueError(f"{name}: a whole number")
+    return int(text)
+
+
+def _range(header):
+    """(first, last) of a `Range: bytes=N-M` header, None to be ignored.
+
+    A suffix range (`bytes=-500`) and anything malformed are ignored, which is
+    what HTTP allows a server to do with a range it does not serve."""
+    match = _RANGE.fullmatch(header.strip())
+    if not match or not match[1]:
+        return None, None
+    first = int(match[1])
+    last = int(match[2]) if match[2] else None
+    if last is not None and last < first:
+        return None, None
+    return first, last
 
 
 def main():

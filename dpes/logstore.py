@@ -65,6 +65,10 @@ class LogDir:
         """Whether `close` was called for this attempt."""
         return self._attempt(execution_id).finished
 
+    def size(self, execution_id: str) -> int:
+        """Bytes of output stored for this attempt (plan/15, D15.15)."""
+        return self._attempt(execution_id).size
+
     def _path(self, execution_id):
         name = hashlib.sha256(execution_id.encode("utf-8")).hexdigest()
         return os.path.join(self._root, name + ".log")
@@ -143,6 +147,10 @@ class _Attempt:
     @property
     def finished(self):
         return self._eof
+
+    @property
+    def size(self):
+        return self._size
 
     def _put(self, record):
         """Append one record at the end of the file, holding its offset.

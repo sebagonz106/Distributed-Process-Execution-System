@@ -3,8 +3,10 @@ import http.client
 import io
 import json
 import os
+import socket
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -28,6 +30,10 @@ class FakeCoordinator:
         self.unschedulable = []  # errors the cluster check would report
         self.keys = []  # idempotency key of each submission (plan/12)
         self.blobs = {}
+        self.logs = {}  # execution id -> the output it has stored
+        self.reads = []  # (execution id, offset, limit) asked for
+        self.follows = []  # (execution id, offset) followed
+        self.streams = {}  # execution id -> what its tail yields
 
     def submit(self, spec, key=None):
         self.keys.append(key)
@@ -56,6 +62,19 @@ class FakeCoordinator:
         if not snapshots:
             return None
         return snapshots.pop(0) if len(snapshots) > 1 else snapshots[0]
+
+    def log_size(self, execution_id):
+        return len(self.logs.get(execution_id, b""))
+
+    def read_fragments(self, execution_id, offset, limit=None):
+        self.reads.append((execution_id, offset, limit))
+        data = self.logs.get(execution_id, b"")
+        end = len(data) if limit is None else min(len(data), offset + limit)
+        return [(1, data[offset:end])] if offset < end else []
+
+    def tail_fragments(self, execution_id, offset):
+        self.follows.append((execution_id, offset))
+        yield from self.streams.get(execution_id, lambda start: ())(offset)
 
 
 def view(state):
@@ -190,6 +209,222 @@ class BlobTest(ServerTestCase):
         status, _ = self.request("POST", "/jobs", json.dumps(job).encode())
 
         self.assertEqual(400, status)
+
+
+class LogApiTest(ServerTestCase):
+    """The log of a task's attempt: by offset, by `Range`, or live
+    (plan/15, D15.4 and D15.15)."""
+
+    EID = "job-1/build/0/1"
+    PATH = "/jobs/job-1/tasks/build/logs"
+
+    def setUp(self):
+        super().setUp()
+        self.output = b"one\ntwo\n"  # eight bytes
+        self.coordinator.logs[self.EID] = self.output
+        self.coordinator.views["job-1"] = [self.job()]
+
+    def job(self, execution_id=EID):
+        return {"job_id": "job-1", "state": "RUNNING",
+                "tasks": {"build": {"state": "RUNNING",
+                                    "execution_id": execution_id}}}
+
+    def get(self, query="", headers=None, path=None):
+        """GET a log as a plain client: status, headers and body."""
+        connection = http.client.HTTPConnection(*self.server.server_address)
+        self.addCleanup(connection.close)
+        connection.request("GET", (path or self.PATH) + query,
+                           headers=headers or {})
+        response = connection.getresponse()
+        return response.status, response.headers, response.read()
+
+    def until_logged(self, caught, message, timeout_s=5):
+        """The records of `message` once they appear: the handler that follows
+        a log runs, and logs, in a thread of its own."""
+        deadline = time.monotonic() + timeout_s
+        while True:
+            records = [r for r in caught.records
+                       if r.getMessage() == message]
+            if records or time.monotonic() > deadline:
+                return records
+            time.sleep(0.05)
+
+    def test_the_output_of_the_task_attempt_is_served_whole(self):
+        status, headers, body = self.get()
+
+        self.assertEqual((200, self.output), (status, body))
+        self.assertEqual("text/plain; charset=utf-8", headers["Content-Type"])
+        self.assertIsNone(headers["Transfer-Encoding"])
+        self.assertEqual([(self.EID, 0, None)], self.coordinator.reads)
+
+    def test_offset_and_limit_slice_the_output_in_bytes(self):
+        status, _, body = self.get("?offset=4&limit=4")
+
+        self.assertEqual((200, b"two\n"), (status, body))
+        self.assertEqual([(self.EID, 4, 4)], self.coordinator.reads)
+
+    def test_an_output_past_its_end_is_an_empty_answer(self):
+        status, headers, body = self.get("?offset=99")
+
+        self.assertEqual((200, b""), (status, body))
+        self.assertEqual("0", headers["Content-Length"])
+
+    def test_an_unknown_job_task_or_attempt_is_not_found(self):
+        for path, execution_id in (
+            ("/jobs/nope/tasks/build/logs", self.EID),
+            ("/jobs/job-1/tasks/other/logs", self.EID),
+            (self.PATH, None),  # known task that never ran
+        ):
+            with self.subTest(path=path, execution_id=execution_id):
+                self.coordinator.views["job-1"] = [self.job(execution_id)]
+                self.assertEqual(404, self.get(path=path)[0])
+
+        self.assertEqual([], self.coordinator.reads)
+
+    def test_a_parameter_that_is_not_a_whole_number_is_refused(self):
+        for query in ("?offset=x", "?limit=-1", "?follow=2",
+                      "?offset=%C2%B2"):  # a digit int() would not read
+            with self.subTest(query=query):
+                self.assertEqual(400, self.get(query)[0])
+
+        self.assertEqual([], self.coordinator.reads)
+
+    def test_a_range_header_takes_over_the_offset(self):
+        status, headers, body = self.get(headers={"Range": "bytes=4-"})
+
+        self.assertEqual((206, b"two\n"), (status, body))
+        self.assertEqual("bytes 4-7/8", headers["Content-Range"])
+
+    def test_a_range_with_an_end_limits_the_answer(self):
+        status, headers, body = self.get(headers={"Range": "bytes=0-2"})
+
+        self.assertEqual((206, b"one"), (status, body))
+        self.assertEqual("bytes 0-2/8", headers["Content-Range"])
+        self.assertEqual([(self.EID, 0, 3)], self.coordinator.reads)
+
+    def test_a_range_this_server_does_not_serve_is_ignored(self):
+        for header in ("bytes=-3", "items=0-1", "bytes=5-2"):
+            with self.subTest(header=header):
+                status, _, body = self.get(headers={"Range": header})
+
+                self.assertEqual((200, self.output), (status, body))
+
+    def test_a_range_beyond_the_end_is_not_satisfiable(self):
+        status, headers, _ = self.get(headers={"Range": "bytes=8-"})
+
+        self.assertEqual(416, status)
+        self.assertEqual("bytes */8", headers["Content-Range"])
+
+    def test_a_range_mixed_with_the_parameters_is_refused(self):
+        for query in ("?offset=1", "?limit=2", "?follow=1"):
+            with self.subTest(query=query):
+                self.assertEqual(
+                    400, self.get(query, {"Range": "bytes=0-"})[0])
+
+    def test_following_streams_the_output_as_it_comes(self):
+        self.coordinator.streams[self.EID] = lambda offset: [
+            (1, b"one\n"), (2, b"two\n")]
+
+        status, headers, body = self.get("?follow=1&offset=2")
+
+        self.assertEqual((200, self.output), (status, body))
+        self.assertEqual("chunked", headers["Transfer-Encoding"])
+        self.assertIsNone(headers["Content-Length"])
+        self.assertEqual([(self.EID, 2)], self.coordinator.follows)
+
+    def test_the_follow_body_is_framed_as_chunks(self):
+        self.coordinator.streams[self.EID] = lambda offset: [(1, b"hi\n")]
+
+        with socket.create_connection(self.server.server_address) as sock:
+            sock.sendall(b"GET " + self.PATH.encode()
+                         + b"?follow=1 HTTP/1.1\r\nHost: dpes\r\n\r\n")
+            raw = b""
+            while True:
+                piece = sock.recv(4096)
+                if not piece:
+                    break
+                raw += piece
+
+        head, body = raw.split(b"\r\n\r\n", 1)
+        self.assertIn(b"Transfer-Encoding: chunked", head)
+        self.assertNotIn(b"Content-Length", head)
+        self.assertEqual(b"3\r\nhi\n\r\n0\r\n\r\n", body)  # last chunk: empty
+
+    def test_a_follow_that_reaches_the_end_says_so(self):
+        self.coordinator.streams[self.EID] = lambda offset: [(1, b"hi\n")]
+
+        with self.assertLogs("dpes.gateway", "INFO") as caught:
+            self.get("?follow=1")
+
+        (record,) = [r for r in caught.records
+                     if r.getMessage() == "log followed"]
+        self.assertEqual({"execution": self.EID, "offset": 0, "bytes": 3,
+                          "stopped": "end"}, record.fields)
+
+    def test_a_client_that_leaves_is_not_followed_any_more(self):
+        following, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def silent(offset):
+            following.set()
+            release.wait(10)  # a quiet attempt: the tail has nothing to send
+            yield from ()
+
+        self.coordinator.streams[self.EID] = silent
+        connection = http.client.HTTPConnection(*self.server.server_address)
+        self.addCleanup(connection.close)
+
+        with self.assertLogs("dpes.gateway", "INFO") as caught:
+            connection.request("GET", self.PATH + "?follow=1")
+            self.assertEqual(200, connection.getresponse().status)
+            self.assertTrue(following.wait(5), "the tail never started")
+            connection.close()  # the client goes away
+            records = self.until_logged(caught, "log followed")
+
+        self.assertTrue(records, "the handler never noticed the client left")
+        self.assertEqual("client", records[0].fields["stopped"])
+
+    def test_a_client_that_leaves_before_its_body_is_out_is_logged(self):
+        def leave(*args, **kwargs):
+            raise BrokenPipeError("the client is gone")
+
+        # `Connection: close` because the answer never gets the header that
+        # would close it: the server closes the connection, as it always does
+        # once the handler returns (D15.15).
+        with mock.patch.object(self.server.RequestHandlerClass,
+                               "_start", leave):
+            with self.assertLogs("dpes.gateway", "WARNING") as caught:
+                with self.assertRaises(http.client.RemoteDisconnected):
+                    self.get(headers={"Connection": "close"})
+
+        (record,) = caught.records
+        self.assertEqual("log cut short", record.getMessage())
+        self.assertEqual("job-1", record.fields["job"])
+
+    def test_a_tail_that_fails_cuts_the_stream_off(self):
+        def broken(offset):
+            raise ConnectionError("store unreachable")
+            yield from ()
+
+        self.coordinator.streams[self.EID] = broken
+
+        with self.assertLogs("dpes.gateway", "WARNING") as caught:
+            # The body never ends: the client sees a cut, not an end (D15.15).
+            with self.assertRaises(http.client.IncompleteRead):
+                self.get("?follow=1")
+
+        (record,) = caught.records
+        self.assertEqual("log cut off", record.getMessage())
+        self.assertEqual("error", record.fields["stopped"])
+
+    def test_serving_a_log_is_logged_with_its_execution(self):
+        with self.assertLogs("dpes.gateway", "INFO") as caught:
+            self.get("?offset=4")
+
+        (record,) = caught.records
+        self.assertEqual("logs served", record.getMessage())
+        self.assertEqual({"execution": self.EID, "offset": 4, "bytes": 4},
+                         record.fields)
 
 
 class IdempotencyKeyTest(ServerTestCase):

@@ -107,6 +107,10 @@ class LogStore:
         """Say the attempt wrote its last fragment (D15.14)."""
         return self._logs.close(execution_id)
 
+    def log_size(self, execution_id):
+        """Bytes of output stored for the attempt (D15.15)."""
+        return self._logs.size(execution_id)
+
     async def tail_fragments(self, execution_id, offset, poll_s=POLL_S,
                              idle_s=IDLE_S):
         """(seq, data) as they arrive, for a client following the log."""
@@ -454,6 +458,11 @@ class _Client:
 
     def read_fragments(self, execution_id, offset, limit=None):
         reply = self._logs.read_fragments.remote(execution_id, offset, limit)
+        return ray.get(reply, timeout=CALL_TIMEOUT_S)
+
+    def log_size(self, execution_id):
+        """Bytes of output an attempt has stored so far (D15.15)."""
+        reply = self._logs.log_size.remote(execution_id)
         return ray.get(reply, timeout=CALL_TIMEOUT_S)
 
     def tail_fragments(self, execution_id, offset):

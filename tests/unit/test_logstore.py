@@ -250,6 +250,20 @@ class LogDirTest(unittest.TestCase):
         self.assertEqual([], self.reopen().read(EID, 0))
         self.assertTrue(self.reopen().finished(EID))
 
+    def test_the_size_is_the_output_stored(self):
+        self.logs.append(EID, 1, b"one\n")
+        self.logs.append(EID, 2, b"two\n")
+
+        self.assertEqual(8, self.logs.size(EID))
+        self.assertEqual(8, self.reopen().size(EID))
+
+    def test_an_attempt_that_wrote_nothing_has_no_size(self):
+        self.assertEqual(0, self.logs.size(EID))
+
+        self.logs.close(EID)
+
+        self.assertEqual(0, self.logs.size(EID))
+
     def test_an_end_marker_cut_short_does_not_count(self):
         self.logs.append(EID, 1, b"one\n")
         with open(self.path(EID), "ab") as f:

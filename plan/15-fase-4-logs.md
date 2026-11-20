@@ -194,6 +194,12 @@ Range: bytes=1000-
 - La pasarela necesita acceso al actor \`LogStore\` (ya tiene acceso al \`BlobStore\` y \`Coordinator\`).
 - \`RAY_DEDUP_LOGS=0\` en compose (ya configurado, D10.7) evita que Ray fusione líneas de distintos intentos.
 
+**Refinada por D15.15**: qué intento se sirve cuando la ruta nombra la
+tarea, `Range` con 206/416 y `Content-Range` exacto, `Connection: close` con
+HTTP/1.1, y hasta dónde llega la limpieza de una desconexión (se libera el hilo
+del handler; el generador remoto del almacén no se puede cancelar y termina por
+inactividad).
+
 ---
 
 ### D15.5 — API de historial de eventos en la pasarela
@@ -476,6 +482,89 @@ puede distinguir «no hay más por ahora» de «no habrá más».
   deja de enviar el resto del log de ese intento y no lo cierra; la tarea no falla
   por ello (un log no puede tumbar un trabajo) y el `tail` acaba por inactividad.
 
+### D15.15 — Cómo la pasarela sirve el log de una tarea
+
+**Contexto:** D15.4 fija las dos formas de pedir el log (por offset y en vivo)
+sobre una ruta que nombra la **tarea**, pero el almacén indexa por **intento**
+(`job/task/round/attempt`): alguien tiene que traducir uno en otro, y la
+traducción tiene que decir qué pasa cuando la tarea no tiene intento. Además un
+`logs -f` puede durar minutos: hay que decidir cuándo se considera que el cliente
+se fue y hasta dónde llega esa limpieza, porque el generador remoto del almacén no
+se puede cancelar.
+
+**Qué intento se sirve.**
+1. **El que la vista del trabajo da para esa tarea** (`tasks[task].execution_id`,
+   D09.6): el que está en vuelo o el que la resolvió. Ninguna API nueva.
+2. **El que nombre el cliente** (`?attempt=N` o el execution id en la ruta):
+   permite leer un intento perdedor, a cambio de exponer la numeración interna y
+   validar que ese intento pertenece a la tarea.
+3. **Todos los intentos concatenados:** mezcla salidas de intentos distintos, que
+   es justo lo que la correlación por execution id evita (F5.5).
+
+**Decisión:** la opción 1, con **404** cuando la tarea no tiene intento
+(`execution_id` nulo: no se lanzó o se omitió). Una conexión en vivo se queda con
+el intento que resolvió al principio: si hay reintento, el log de ese intento
+termina y el seguidor acaba; el cliente que quiera el intento nuevo repite la
+petición. Queda escrito como límite, no como olvido.
+
+**Tamaño del log.** `Content-Range` y el 416 necesitan el tamaño total y
+`read_fragments` no lo da. Opciones: (a) responder `bytes a-b/*`, legal con el
+total desconocido; (b) añadir `log_size` al almacén, que ya lleva la cuenta en
+memoria (`_size`). **Decisión:** (b): tres líneas por capa, `Content-Range` exacto
+y, de paso, el tamaño que el `-n` del CLI necesita para estimar por bytes (D15.7).
+
+**Framing.** `Transfer-Encoding: chunked` está definido para HTTP/1.1 y la
+pasarela hablaba HTTP/1.0 (el valor por omisión de `BaseHTTPRequestHandler`).
+Opciones: (a) `protocol_version = "HTTP/1.1"` y `Connection: close` en todas las
+respuestas; (b) dejar HTTP/1.0 y escribir el framing igualmente (los clientes de
+Python lo aceptan, pero un intermediario no tiene por qué). **Decisión:** (a).
+`Connection: close` porque el CLI abre una conexión por orden —no se gana nada con
+mantenerla— y porque un rechazo que no lee el cuerpo (411, 413) dejaría esos bytes
+en una conexión viva y el siguiente «request» sería basura.
+
+**Desconexión.** Con un `for` sobre el `tail`, el handler solo se enteraría al
+escribir el fragmento siguiente, y un intento callado puede pasar minutos sin
+escribir: el hilo de la pasarela quedaría retenido hasta `IDLE_S` (300 s) por cada
+cliente que se va, y un cliente que abre y cierra conexiones agota los hilos de
+`ThreadingHTTPServer`. Opciones: (a) enterarse solo al escribir; (b) leer el
+`tail` en un hilo propio y, mientras no hay fragmento, preguntar al socket
+(`select` + `MSG_PEEK`: legible y sin bytes = el cliente cerró). **Decisión:**
+(b), con `POLL_S = 0.5`.
+
+**Porqué:**
+- La resolución por la vista no añade contratos ni deja al cliente adivinar la
+  numeración de intentos, y un 404 explícito distingue «esa tarea no existe» de
+  «todavía no corrió», que es lo que un usuario necesita al depurar.
+- `log_size` es la única forma de que `Content-Range` diga la verdad; el total es
+  un dato que el almacén ya tiene y no cuesta ni una lectura de disco.
+- Con `Connection: close` el framing es legal y no hay keep-alive que romper: la
+  respuesta se delimita por el último chunk y por el cierre, sin estados raros.
+- La opción (b) de la desconexión devuelve el hilo del handler en medio segundo
+  sin depender de que el intento escriba; la limpieza del lado del almacén no
+  puede ser inmediata (Ray no cancela un generador remoto) y no se promete.
+
+**Consecuencias:**
+- La pasarela gana `log_size` en `_Client`; el almacén, `LogStore.log_size`. El
+  CLI podrá usar el tamaño para su `-n` (D15.7).
+- `Range` se acepta como alternativa a `offset` (bonus de D15.4): `bytes=N-` y
+  `bytes=N-M` responden 206 con `Content-Range`; mezclar `Range` con `offset`,
+  `limit` o `follow` es 400; un rango que empieza en el final o después es 416 con
+  `Content-Range: bytes */total`; un `Range` que no tiene esa forma (el sufijo
+  `bytes=-500`, por ejemplo) se ignora y se sirve el cuerpo entero, que es lo que
+  la RFC permite.
+- Un `offset` o `limit` que no es un número entero no negativo es 400; un
+  `follow` que no es `0` ni `1`, también.
+- Queda un hilo `dpes-tail` por conexión en vivo mientras dura: es el precio de
+  detectar la desconexión; lo que no queda es el hilo del handler ni la espera de
+  cinco minutos.
+- Si un cliente deja de leer sin cerrar, la escritura se bloquea y la cola entre
+  ese hilo y el handler crece con la salida del intento: es otra cara del
+  crecimiento sin cota de §7 (D15.13, pendiente), no una garantía que se pierda.
+- Los bytes que se sirven son los fragmentos tal cual: un lector que decodifique
+  UTF-8 debe hacerlo tras unir, porque un corte puede caer dentro de un carácter.
+- `RAY_DEDUP_LOGS=0` sigue siendo asunto del clúster (D15.9, `compose.yaml`); la
+  pasarela no filtra ni fusiona líneas.
+
 ---
 
 ## 3. Contratos entre componentes (resumen)
@@ -485,6 +574,7 @@ puede distinguir «no hay más por ahora» de «no habrá más».
 | Executor (hilo emisor) | LogStore (actor) | \`append_fragment(eid, seq, bytes) -> bool\` | Idempotente por seq |
 | Executor (hilo emisor) | LogStore (actor) | \`close_fragments(eid) -> bool\` | Marca el fin (D15.14) |
 | LogStore (actor) | Gateway | \`read_fragments(eid, offset, limit) -> [(seq, bytes)]\` | Offset en bytes |
+| LogStore (actor) | Gateway | \`log_size(eid) -> int\` | Bytes de salida (D15.15) |
 | LogStore (actor) | Gateway | \`tail_fragments(eid, offset) -> AsyncIterator[(seq, bytes)]\` | Para streaming |
 | Scheduler (núcleo) | Coordinador (actor) | \`job._events -> List[Event]\` | Datos puros, sin Ray |
 | Coordinador (actor) | Gateway | \`events(job_id) -> List[Event]\` | Serializado a JSON |
@@ -629,6 +719,73 @@ permite cancelar el generador remoto al cerrar el del llamante, de ahí el tope.
   el registro `(0, 0)`.
 
 **Siguiente:** Commit 4 (la pasarela sirve los logs por offset y en vivo).
+
+### Commit 4 — la pasarela sirve el log de una tarea (2026-11-19)
+
+**Qué hay:**
+
+- `dpes/logstore.py` y `dpes/coordinator.py`: `LogDir.size`, `LogStore.log_size`
+  y `_Client.log_size` dan el total en bytes que `Content-Range` necesita
+  (D15.15). No lee el disco: usa el `_size` que el índice ya lleva.
+- `dpes/gateway.py`: ruta `_LOG_PATH` (`/jobs/{job}/tasks/{task}/logs`), probada
+  antes que la del estado para que `.../logs` no se confunda con un identificador
+  de trabajo. `_answer_logs` pasa de `{job, task}` al intento que la vista da
+  (`tasks[task].execution_id`, D15.15) y responde 404 si no existen el trabajo,
+  la tarea o el intento; `_log_request` valida `offset`, `limit`, `follow` y
+  `Range` (400 cuando no cuadran). `Range` se sirve como 206 con
+  `Content-Range`, como 416 con `bytes */total` si empieza en el final o después,
+  y se ignora (200 con el cuerpo entero) cuando no es un rango de bytes que este
+  servidor sirva.
+- `_follow` responde `text/plain` con `Transfer-Encoding: chunked`; la pasarela
+  habla HTTP/1.1 y cierra todas las respuestas (`Connection: close`, D15.15).
+  Escribe un chunk por fragmento y termina con el chunk vacío cuando el intento
+  cerró su log (D15.14). El `tail` se lee en un hilo `dpes-tail` propio
+  (`_Reader`), y el handler pregunta cada `FOLLOW_POLL_S = 0,5` s si su cliente
+  sigue ahí (`select` + `MSG_PEEK`): una conexión abandonada se suelta en medio
+  segundo y no en los 300 s de `IDLE_S`.
+- Registro (D10.5): `logs served` (`INFO`) con `execution=`, `offset=`, `bytes=`
+  y, si lo hay, `limit=`; `log followed` (`INFO`) o `log cut off` (`WARNING`)
+  con `execution=`, `offset=`, `bytes=` y `stopped=` (`end`, `client`, `error`);
+  `log cut short` (`WARNING`) si el cliente se va con el cuerpo a medio
+  escribir. La pasarela no reescribe la salida (D15.9, `RAY_DEDUP_LOGS=0` sigue
+  siendo asunto del clúster).
+
+**Pruebas:**
+
+| Lo que se afirma | Test que lo evidencia | Nivel |
+|------------------|-----------------------|-------|
+| El intento se sirve entero y en `text/plain` | `test_the_output_of_the_task_attempt_is_served_whole` | Unit |
+| `offset` y `limit` cortan por bytes | `test_offset_and_limit_slice_the_output_in_bytes`, `test_an_output_past_its_end_is_an_empty_answer` | Unit |
+| Trabajo, tarea o intento desconocidos: 404 | `test_an_unknown_job_task_or_attempt_is_not_found` | Unit |
+| Parámetros que no son números enteros: 400 | `test_a_parameter_that_is_not_a_whole_number_is_refused` | Unit |
+| `Range` como alternativa a `offset` (206 y `Content-Range`) | `test_a_range_header_takes_over_the_offset`, `test_a_range_with_an_end_limits_the_answer` | Unit |
+| Un `Range` que no se sirve se ignora; uno imposible es 416 | `test_a_range_this_server_does_not_serve_is_ignored`, `test_a_range_beyond_the_end_is_not_satisfiable` | Unit |
+| `Range` mezclado con la consulta es 400 | `test_a_range_mixed_with_the_parameters_is_refused` | Unit |
+| El tamaño del log, sin leer el disco (D15.15) | `test_the_size_is_the_output_stored`, `test_an_attempt_that_wrote_nothing_has_no_size` | Unit |
+| `follow` transmite fragmento a fragmento y en chunks | `test_following_streams_the_output_as_it_comes`, `test_the_follow_body_is_framed_as_chunks` | Unit |
+| El fin del intento cierra el flujo | `test_a_follow_that_reaches_the_end_says_so` | Unit |
+| Un cliente que se va deja de seguirse | `test_a_client_that_leaves_is_not_followed_any_more` | Unit |
+| Un cliente que se va con el cuerpo a medio escribir no es un fallo | `test_a_client_that_leaves_before_its_body_is_out_is_logged` | Unit |
+| Un almacén que falla corta el flujo, no lo termina | `test_a_tail_that_fails_cuts_the_stream_off` | Unit |
+| Cada respuesta deja su traza con `execution=` | `test_serving_a_log_is_logged_with_its_execution` | Unit |
+| El camino completo, de la pasarela al actor real | `tests/integration/test_logstore.py`: `test_the_gateway_serves_the_bytes_the_attempt_wrote`, `test_a_follower_sees_the_output_as_the_attempt_writes_it`, `test_a_client_that_leaves_is_not_followed_any_more` | Integration |
+
+**Verificación (2026-11-19, clúster de tres nodos):**
+
+- `py -W error -m unittest discover -s tests/unit` → 229 pruebas OK (2 saltadas
+  por ser de Linux).
+- En el nodo de control, `python -W error -m unittest discover -s tests/unit` →
+  277 pruebas OK (sin saltos).
+- `tests/integration` → 31 pruebas OK; `tests/e2e` → 23 pruebas OK.
+- `py -m unittest discover -s tests/host` → 8 pruebas OK.
+- Comprobación fuera de las pruebas, con la pasarela del nodo de control y un
+  trabajo que imprime tres líneas espaciadas: `follow=1` las emitió según se
+  producían y cerró al terminar la tarea; `offset=6&limit=6` devolvió `line2\n`;
+  `Range: bytes=12-` → 206 con `Content-Range: bytes 12-17/18`;
+  `Range: bytes=18-` → 416 con `bytes */18`; una tarea desconocida → 404;
+  `offset=x` → 400; `Range` junto a `offset` → 400.
+
+**Siguiente:** Commit 5 (la API de historial de eventos, D15.5).
 
 ---
 
