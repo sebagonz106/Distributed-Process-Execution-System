@@ -243,6 +243,24 @@ inactividad).
 - Timestamp en ISO 8601 UTC con milisegundos (generado en el coordinador al emitir, en hora de pared; D15.16).
 - El endpoint es de solo lectura; no requiere idempotency key.
 
+**Al implementar (2026-11-20):**
+- El instante lo pone el coordinador; **el texto ISO lo escribe la pasarela**
+  (`_wire`/`_iso`). El actor devuelve el flotante tal cual porque es lo que el
+  diario rejuega y lo que las pruebas comparan de forma exacta: la
+  representación de una hora es asunto del transporte, no del dato. La frase
+  «generado en el coordinador» de arriba se refiere al instante, no al formato.
+- Redondear al milisegundo puede saltar al segundo siguiente
+  (`1795143281.9996` → `…:42.000Z`): `_iso` redondea a milisegundos enteros y
+  deriva la fecha de `millis // 1000`, así que el acarreo es correcto.
+- Ruta propia `_EVENTS_PATH`, probada antes que la del estado y con
+  `unquote`, como la de logs. Un trabajo conocido sin eventos todavía es
+  `[]` (200), no un 404: el 404 se reserva a «ese trabajo no existe».
+- La consulta se registra en DEBUG con `job` y `found`, como el estado: los
+  clientes la sondean (D10.5). Nunca se registra el contenido de un evento
+  (D10.6).
+- `_Client.events(job_id)` es una llamada bloqueante más con `CALL_TIMEOUT_S`,
+  igual que `status`.
+
 ---
 
 ### D15.6 — Emisión de eventos desde el scheduler (núcleo puro)
@@ -643,9 +661,11 @@ cliente que se va, y un cliente que abre y cierra conexiones agota los hilos de
 | LogStore (actor) | Gateway | \`log_size(eid) -> int\` | Bytes de salida (D15.15) |
 | LogStore (actor) | Gateway | \`tail_fragments(eid, offset) -> AsyncIterator[(seq, bytes)]\` | Para streaming |
 | Scheduler (núcleo) | Coordinador (actor) | \`job.events() -> List[Event]\` | Datos puros, sin Ray; reloj inyectado (D15.16) |
-| Coordinador (actor) | Gateway | \`events(job_id) -> list[dict] | None\` | \`None\` si el trabajo no existe; JSON listo |
+| Coordinador (actor) | Gateway | \`events(job_id) -> list[dict] | None\` | \`None\` si el trabajo no existe; \`timestamp\` flotante |
+| Coordinador (actor) | \`_Client\` | \`events(job_id)\`, igual que \`status(job_id)\` | Bloqueantes, con \`CALL_TIMEOUT_S\` |
 | Coordinador (actor) | Journal (SQLite) | \`append(job, kind, *args) -> at\` / \`events() -> (job, kind, args, at)\` | La hora de cada llamada (D15.16) |
 | Gateway | Cliente CLI | HTTP \`GET /logs?offset=&limit=\` / \`?follow=1\` | text/plain, chunked |
+| Gateway | Cliente CLI | HTTP \`GET /jobs/{id}/events\` | application/json; hora ISO 8601 UTC (D15.5) |
 
 ---
 
@@ -659,6 +679,7 @@ cliente que se va, y un cliente que abre y cierra conexiones agota los hilos de
 | \`test_offset_resumption\` | \`logs -o N\` retoma exactamente en byte N | E2E |
 | \`test_duplicate_fragment_ignored\` | LogStore ignora seq duplicado | Unit |
 | \`EventsTest\` | Cada transición genera el Event correcto (Commit 5) | Unit |
+| \`EventsApiTest\` | \`GET /jobs/{id}/events\`: orden, claves, hora ISO, 404 (Commit 6) | Unit |
 | \`test_gateway_streaming_cleanup\` | Desconexión cliente limpia suscripción tail | Integration |
 
 ---
@@ -932,6 +953,59 @@ permite cancelar el generador remoto al cerrar el del llamante, de ahí el tope.
 
 **Siguiente:** Commit 6 (el endpoint `GET /jobs/{id}/events`), que solo añade el
 transporte HTTP y `_Client.events`.
+
+---
+
+### Commit 6 — la pasarela sirve el feed de eventos (2026-11-20)
+
+**Qué hay:**
+
+- `dpes/gateway.py`: ruta `_EVENTS_PATH` (`/jobs/{job}/events`), probada antes
+  que la del estado y con `unquote`, como la de logs. `_serve_events` llama a
+  `coordinator.events(job_id)`: 404 si el trabajo no existe, `[]` si existe y
+  aún no tiene eventos, 200 con la lista en el orden del actor (orden de
+  inserción, D15.16). 503 si el coordinador no contesta, como el resto.
+- El instante pasa a texto en el transporte: `_wire` copia el evento y cambia su
+  `timestamp` por el de `_iso` (ISO 8601 UTC con milisegundos, D15.5). El actor
+  sigue devolviendo el flotante del diario para que el replay sea idéntico.
+- `dpes/coordinator.py`: `_Client.events(job_id)`, una llamada bloqueante más
+  con `CALL_TIMEOUT_S`, igual que `status`.
+- La consulta se registra en DEBUG (`events served`, `job`, `found`, `events`):
+  es un endpoint que los clientes sondean, y nunca se registra su contenido
+  (D10.5, D10.6).
+
+**Pruebas:**
+
+| Lo que se afirma | Test que lo evidencia | Nivel |
+|------------------|-----------------------|-------|
+| El feed sale en el orden en que ocurrió, y se pide el trabajo de la ruta | `EventsApiTest.test_the_feed_is_served_oldest_first` | Unit |
+| Cada evento lleva `job_id`, `task`, `execution_id` y su `payload` | `test_every_event_carries_the_keys_that_correlate_it` | Unit |
+| `JOB_FINISHED` no pertenece a ninguna tarea | `test_the_end_of_the_job_belongs_to_no_task` | Unit |
+| La hora es ISO 8601 UTC con milisegundos, con acarreo correcto | `test_the_time_is_iso_8601_utc_with_milliseconds` | Unit |
+| Un trabajo sin eventos es `[]`; uno desconocido, 404 | `test_a_job_with_no_events_yet_is_an_empty_feed`, `test_an_unknown_job_is_not_found` | Unit |
+| Un coordinador caído es 503, no un cuerpo vacío | `test_an_unreachable_coordinator_is_reported_as_unavailable` | Unit |
+| Sondear el feed no escribe líneas INFO | `test_polling_the_feed_stays_below_info` | Unit |
+| `_Client.events` trae el feed real de un trabajo con reintento | `RetryTest.test_the_feed_shows_the_failure_the_retry_and_the_end` | Integration |
+| El feed sobrevive al reinicio del coordinador, horas incluidas | `RecoveryTest.test_the_feed_of_a_finished_job_survives_unchanged` | Integration |
+
+**Verificación (2026-11-20, clúster de tres nodos):**
+
+- `py -W error -m unittest discover -s tests/unit` → 252 pruebas OK (2 saltadas).
+- En el nodo de control, `python -W error -m unittest discover -s tests/unit` →
+  300 pruebas OK; `tests/integration` → 35 OK; `tests/e2e` → 23 OK;
+  `tests/host` → 8 OK. Una pasada de las unitarias, inmediatamente después de
+  reconstruir la imagen, terminó en `FAILED (failures=1)` sin que se capturara
+  el nombre; las cinco siguientes (tras reiniciar los contenedores y tras otra
+  reconstrucción) dieron 300 OK, así que se anota como fallo no reproducido de
+  las pruebas que dependen de tiempos en un clúster recién levantado, no como
+  algo de este cambio.
+- Comprobación fuera de las pruebas, contra la pasarela real: un trabajo de dos
+  tareas devolvió por HTTP cinco eventos en orden, con horas como
+  `2026-11-20T03:47:21.963Z`, `task: null` en `JOB_FINISHED` y
+  `counts: {"succeeded": 2}`; `/jobs/nope/events` respondió 404. Se mató el
+  coordinador y la misma petición devolvió el **mismo JSON**, byte a byte.
+
+**Siguiente:** Commit 7 (el comando `logs` del CLI), que consumirá este endpoint.
 
 ---
 

@@ -1,8 +1,8 @@
 """HTTP gateway: validates jobs at the trust boundary, forwards them.
 
-Talks to any object with `submit(spec)`, `status(job_id)` and the log calls 
-(`read_fragments`, `tail_fragments`, `log_size`) (plan/07, D07.9; plan/15, D15.15). 
-Run on the control node with 
+Talks to any object with `submit(spec)`, `status(job_id)`, `events(job_id)` and
+the log calls (`read_fragments`, `tail_fragments`, `log_size`) (plan/07, D07.9;
+plan/15, D15.5 and D15.15). Run on the control node with
     `python -m dpes.gateway`.
 """
 
@@ -13,6 +13,7 @@ import re
 import select
 import socket
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -26,6 +27,7 @@ PORT = 8000
 FOLLOW_POLL_S = 0.5  # how often a follower checks its client is still there
 _JOB_PATH = re.compile(r"/jobs/([^/]+)")
 _LOG_PATH = re.compile(r"/jobs/([^/]+)/tasks/([^/]+)/logs")
+_EVENTS_PATH = re.compile(r"/jobs/([^/]+)/events")
 _BLOB_PATH = re.compile(r"/blobs/(sha256:[0-9a-f]{64})")
 _RANGE = re.compile(r"bytes=(\d*)-(\d*)")
 _KEY = re.compile(r"[A-Za-z0-9_-]{1,64}")  # idempotency key (plan/12, D12.7)
@@ -104,6 +106,9 @@ class _Handler(BaseHTTPRequestHandler):
         logs = _LOG_PATH.fullmatch(path)
         if logs:
             return self._serve_logs(unquote(logs[1]), unquote(logs[2]))
+        feed = _EVENTS_PATH.fullmatch(path)
+        if feed:
+            return self._serve_events(unquote(feed[1]))
         match = _JOB_PATH.fullmatch(path)
         if not match:
             return self._send(404, {"error": "not found"})
@@ -128,6 +133,23 @@ class _Handler(BaseHTTPRequestHandler):
         event(_log, logging.INFO, "blob served", digest=name, bytes=len(data))
         self._start(200, "application/octet-stream", len(data))
         self.wfile.write(data)
+
+    def _serve_events(self, job_id):
+        """The job's event feed, oldest first, each time as ISO 8601 (D15.5).
+
+        The actor keeps the events with the float the journal recorded, so a
+        restart rebuilds them exactly; the wire format is this layer's job."""
+        try:
+            feed = self.server.coordinator.events(job_id)
+        except Exception as error:  # whatever broke, the gateway stays up
+            return self._unavailable(error)
+        # Clients poll this as they poll the status: below INFO (D10.5).
+        event(_log, logging.DEBUG, "events served", job=job_id,
+              found=feed is not None,
+              **({"events": len(feed)} if feed is not None else {}))
+        if feed is None:
+            return self._send(404, {"error": "unknown job"})
+        self._send(200, [_wire(e) for e in feed])
 
     def _serve_logs(self, job_id, task):
         """The log of the task's current attempt: by offset, or as it grows."""
@@ -295,6 +317,21 @@ class _Reader:
         if isinstance(item, Exception):
             raise item
         return item
+
+
+def _wire(event_dict):
+    """One event as the client sees it: the same keys, the time in ISO 8601.
+
+    The actor keeps the wall-clock float because that is what the journal
+    replays; only the transport decides how a time is written (D15.5)."""
+    return dict(event_dict, timestamp=_iso(event_dict["timestamp"]))
+
+
+def _iso(timestamp):
+    """A wall-clock time as ISO 8601 UTC with milliseconds (D15.5)."""
+    millis = round(timestamp * 1000)  # rounding can roll into the next second
+    return (time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(millis // 1000))
+            + f".{millis % 1000:03d}Z")
 
 
 def _log_request(query, headers):

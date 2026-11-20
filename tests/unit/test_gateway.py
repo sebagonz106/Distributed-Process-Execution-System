@@ -31,6 +31,8 @@ class FakeCoordinator:
         self.keys = []  # idempotency key of each submission (plan/12)
         self.blobs = {}
         self.logs = {}  # execution id -> the output it has stored
+        self.feeds = {}  # job id -> the events the actor returns
+        self.feed_requests = []  # job ids whose feed was asked for
         self.reads = []  # (execution id, offset, limit) asked for
         self.follows = []  # (execution id, offset) followed
         self.streams = {}  # execution id -> what its tail yields
@@ -62,6 +64,12 @@ class FakeCoordinator:
         if not snapshots:
             return None
         return snapshots.pop(0) if len(snapshots) > 1 else snapshots[0]
+
+    def events(self, job_id):
+        if self.broken:
+            raise ConnectionError("coordinator unreachable")
+        self.feed_requests.append(job_id)
+        return self.feeds.get(job_id)
 
     def log_size(self, execution_id):
         return len(self.logs.get(execution_id, b""))
@@ -165,6 +173,88 @@ class GatewayTest(ServerTestCase):
 
         self.assertEqual(503, self.post_job(HELLO_JOB)[0])
         self.assertEqual(503, self.request("GET", "/jobs/job-1")[0])
+
+
+class EventsApiTest(ServerTestCase):
+    """`GET /jobs/{id}/events`: the feed as data, oldest first (plan/15,
+    D15.5), with every key a client needs to correlate an event."""
+
+    PATH = "/jobs/job-1/events"
+
+    def event(self, kind="TASK_LAUNCHED", **fields):
+        return {"timestamp": 0.0, "type": kind, "job_id": "job-1",
+                "task": "build", "execution_id": "job-1/build/0/1",
+                "payload": {"state": "RUNNING"}, **fields}
+
+    def test_the_feed_is_served_oldest_first(self):
+        kinds = ["TASK_LAUNCHED", "ATTEMPT_FAILED", "RETRY_SCHEDULED",
+                 "ATTEMPT_SUCCEEDED", "JOB_FINISHED"]
+        self.coordinator.feeds["job-1"] = [self.event(kind) for kind in kinds]
+
+        status, body = self.request("GET", self.PATH)
+
+        self.assertEqual(200, status)
+        self.assertEqual(kinds, [e["type"] for e in body])
+        self.assertEqual(["job-1"], self.coordinator.feed_requests)
+
+    def test_every_event_carries_the_keys_that_correlate_it(self):
+        self.coordinator.feeds["job-1"] = [self.event()]
+
+        _, body = self.request("GET", self.PATH)
+
+        (only,) = body
+        self.assertEqual({"timestamp", "type", "job_id", "task",
+                          "execution_id", "payload"}, set(only))
+        self.assertEqual(("job-1", "build", "job-1/build/0/1"),
+                         (only["job_id"], only["task"],
+                          only["execution_id"]))
+        self.assertEqual({"state": "RUNNING"}, only["payload"])
+
+    def test_the_end_of_the_job_belongs_to_no_task(self):
+        self.coordinator.feeds["job-1"] = [
+            self.event("JOB_FINISHED", task=None, execution_id="",
+                       payload={"state": "SUCCEEDED", "succeeded": 1})
+        ]
+
+        _, body = self.request("GET", self.PATH)
+
+        (only,) = body
+        self.assertIsNone(only["task"])
+        self.assertEqual("", only["execution_id"])
+
+    def test_the_time_is_iso_8601_utc_with_milliseconds(self):
+        cases = (  # the journal's epoch, half a second, a time that rounds up
+            (0.0, "1970-01-01T00:00:00.000Z"),
+            (1000000000.5, "2001-09-09T01:46:40.500Z"),
+            (1000000000.9996, "2001-09-09T01:46:41.000Z"),
+        )
+        for timestamp, expected in cases:
+            with self.subTest(timestamp=timestamp):
+                self.coordinator.feeds["job-1"] = [
+                    self.event(timestamp=timestamp)]
+
+                _, body = self.request("GET", self.PATH)
+
+                self.assertEqual(expected, body[0]["timestamp"])
+
+    def test_a_job_with_no_events_yet_is_an_empty_feed(self):
+        self.coordinator.feeds["job-1"] = []
+
+        self.assertEqual((200, []), self.request("GET", self.PATH))
+
+    def test_an_unknown_job_is_not_found(self):
+        self.assertEqual(404, self.request("GET", "/jobs/nope/events")[0])
+
+    def test_an_unreachable_coordinator_is_reported_as_unavailable(self):
+        self.coordinator.broken = True
+
+        self.assertEqual(503, self.request("GET", self.PATH)[0])
+
+    def test_polling_the_feed_stays_below_info(self):
+        self.coordinator.feeds["job-1"] = [self.event()]
+
+        with self.assertNoLogs("dpes.gateway", "INFO"):
+            self.request("GET", self.PATH)
 
 
 class BlobTest(ServerTestCase):

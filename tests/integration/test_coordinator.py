@@ -227,7 +227,8 @@ class RetryTest(CoordinatorTestCase):
     def test_the_feed_shows_the_failure_the_retry_and_the_end(self):
         view = self.run_one("die-once")
 
-        events = self.events(view["job_id"])
+        client = _Client(self.coordinator, self.store, self.logs)
+        events = client.events(view["job_id"])
 
         self.assertEqual(
             ["TASK_LAUNCHED", "ATTEMPT_FAILED", "RETRY_SCHEDULED",

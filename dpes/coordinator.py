@@ -498,6 +498,11 @@ class _Client:
         reply = self._actor.status.remote(job_id)
         return ray.get(reply, timeout=CALL_TIMEOUT_S)
 
+    def events(self, job_id):
+        """The job's event feed, oldest first, or None (plan/15, D15.5)."""
+        reply = self._actor.events.remote(job_id)
+        return ray.get(reply, timeout=CALL_TIMEOUT_S)
+
     def put_blob(self, name, data):
         reply = self._store.put.remote(name, data)
         return ray.get(reply, timeout=STORE_TIMEOUT_S)
