@@ -415,7 +415,11 @@ class LogApiTest(ServerTestCase):
         self.coordinator.streams[self.EID] = lambda offset: [
             (1, b"one\n"), (2, b"two\n")]
 
-        status, headers, body = self.get("?follow=1&offset=2")
+        with self.assertLogs("dpes.gateway", "INFO") as caught:
+            status, headers, body = self.get("?follow=1&offset=2")
+            # A follow logs its end once its body is out (D15.15): waiting for
+            # the record here keeps it from landing in another test's capture.
+            self.assertTrue(self.until_logged(caught, "log followed"))
 
         self.assertEqual((200, self.output), (status, body))
         self.assertEqual("chunked", headers["Transfer-Encoding"])
@@ -425,15 +429,17 @@ class LogApiTest(ServerTestCase):
     def test_the_follow_body_is_framed_as_chunks(self):
         self.coordinator.streams[self.EID] = lambda offset: [(1, b"hi\n")]
 
-        with socket.create_connection(self.server.server_address) as sock:
-            sock.sendall(b"GET " + self.PATH.encode()
-                         + b"?follow=1 HTTP/1.1\r\nHost: dpes\r\n\r\n")
-            raw = b""
-            while True:
-                piece = sock.recv(4096)
-                if not piece:
-                    break
-                raw += piece
+        with self.assertLogs("dpes.gateway", "INFO") as caught:
+            with socket.create_connection(self.server.server_address) as sock:
+                sock.sendall(b"GET " + self.PATH.encode()
+                             + b"?follow=1 HTTP/1.1\r\nHost: dpes\r\n\r\n")
+                raw = b""
+                while True:
+                    piece = sock.recv(4096)
+                    if not piece:
+                        break
+                    raw += piece
+            self.assertTrue(self.until_logged(caught, "log followed"))
 
         head, body = raw.split(b"\r\n\r\n", 1)
         self.assertIn(b"Transfer-Encoding: chunked", head)
@@ -445,11 +451,11 @@ class LogApiTest(ServerTestCase):
 
         with self.assertLogs("dpes.gateway", "INFO") as caught:
             self.get("?follow=1")
+            records = self.until_logged(caught, "log followed")
 
-        (record,) = [r for r in caught.records
-                     if r.getMessage() == "log followed"]
+        self.assertEqual(1, len(records), "the follow never logged its end")
         self.assertEqual({"execution": self.EID, "offset": 0, "bytes": 3,
-                          "stopped": "end"}, record.fields)
+                          "stopped": "end"}, records[0].fields)
 
     def test_a_client_that_leaves_is_not_followed_any_more(self):
         following, release = threading.Event(), threading.Event()
@@ -507,14 +513,20 @@ class LogApiTest(ServerTestCase):
         self.assertEqual("log cut off", record.getMessage())
         self.assertEqual("error", record.fields["stopped"])
 
+    def test_a_coordinator_that_breaks_is_unavailable_not_a_cut(self):
+        # Only writing to a gone client is a cut; a failure behind us is 503.
+        self.coordinator.broken = True
+
+        self.assertEqual(503, self.get()[0])
+
     def test_serving_a_log_is_logged_with_its_execution(self):
         with self.assertLogs("dpes.gateway", "INFO") as caught:
             self.get("?offset=4")
 
-        (record,) = caught.records
-        self.assertEqual("logs served", record.getMessage())
+        self.assertEqual(["logs served"], [r.getMessage()
+                                          for r in caught.records])
         self.assertEqual({"execution": self.EID, "offset": 4, "bytes": 4},
-                         record.fields)
+                         caught.records[0].fields)
 
 
 class IdempotencyKeyTest(ServerTestCase):

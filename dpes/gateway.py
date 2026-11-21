@@ -155,7 +155,11 @@ class _Handler(BaseHTTPRequestHandler):
         """The log of the task's current attempt: by offset, or as it grows."""
         try:
             return self._answer_logs(job_id, task)
-        except OSError as error:  # the client left before its body was out
+        except (BrokenPipeError, ConnectionResetError) as error:
+            # Only these two mean the client left before its body was out:
+            # anything else is the store's or the coordinator's, and has to
+            # reach the client as a 503, which `logs` turns into its own code
+            # instead of a silent cut (D15.7).
             event(_log, logging.WARNING, "log cut short", job=job_id,
                   error=f"{type(error).__name__}: {error}")
         except Exception as error:  # whatever broke, the gateway stays up
@@ -196,10 +200,13 @@ class _Handler(BaseHTTPRequestHandler):
             extra = (("Content-Range", f"bytes {offset}-{last}/{size}"),)
         self._start(206 if ranged else 200, "text/plain; charset=utf-8",
                     len(data), extra)
-        self.wfile.write(data)
+        # The record goes out before the last byte of the body: a client that
+        # has read the whole log can already see why it was served (D15.15),
+        # and a test that reads it cannot race the record.
         event(_log, logging.INFO, "logs served", execution=execution_id,
               offset=offset, bytes=len(data),
               **({"limit": limit} if limit is not None else {}))
+        self.wfile.write(data)
 
     def _follow(self, execution_id, offset):
         """Stream the log as it grows, one chunk per fragment (D15.4).
@@ -209,7 +216,7 @@ class _Handler(BaseHTTPRequestHandler):
         quiet attempt cannot hold this handler for minutes (D15.15)."""
         reader = _Reader(self.server.coordinator.tail_fragments(
             execution_id, offset))
-        sent, stopped, fault = 0, "end", None
+        sent, noted = 0, False
         try:
             self._start(200, "text/plain; charset=utf-8", None,
                         (("Transfer-Encoding", "chunked"),))
@@ -218,27 +225,38 @@ class _Handler(BaseHTTPRequestHandler):
                     data = reader.get(timeout=FOLLOW_POLL_S)
                 except queue.Empty:
                     if self._client_gone():
-                        stopped = "client"
-                        return
+                        return self._note_follow(execution_id, offset, sent,
+                                                 "client")
                     continue
                 if data is None:  # the log ended: nothing more will come
                     break
                 if data:  # never an empty chunk: it would end the body
                     self._chunk(data)
                     sent += len(data)
-            self.wfile.write(b"0\r\n\r\n")  # the last chunk ends the body
+            # Say it ended, then finish the body: the record is in place before
+            # the end can be seen, and the follow is recorded exactly once.
+            self._note_follow(execution_id, offset, sent, "end")
+            noted = True
+            try:
+                self.wfile.write(b"0\r\n\r\n")  # the last chunk ends the body
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # the log itself went out; the client left at the trailer
         except (BrokenPipeError, ConnectionResetError):
-            stopped = "client"  # it left while a fragment was being written
+            if not noted:  # it left while a fragment was being written
+                self._note_follow(execution_id, offset, sent, "client")
         except Exception as error:  # the store, or the socket, failed under us
-            stopped, fault = "error", f"{type(error).__name__}: {error}"
-        finally:
-            fields = {"execution": execution_id, "offset": offset,
-                      "bytes": sent, "stopped": stopped}
-            if fault:
-                event(_log, logging.WARNING, "log cut off", error=fault,
-                      **fields)
-            else:
-                event(_log, logging.INFO, "log followed", **fields)
+            if not noted:
+                self._note_follow(execution_id, offset, sent, "error",
+                                  f"{type(error).__name__}: {error}")
+
+    def _note_follow(self, execution_id, offset, sent, stopped, fault=None):
+        """Record how a followed log ended (D15.15)."""
+        fields = {"execution": execution_id, "offset": offset,
+                  "bytes": sent, "stopped": stopped}
+        if fault:
+            event(_log, logging.WARNING, "log cut off", error=fault, **fields)
+        else:
+            event(_log, logging.INFO, "log followed", **fields)
 
     def _client_gone(self):
         """Whether the client closed a stream that has nothing to write."""

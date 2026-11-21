@@ -31,11 +31,11 @@ def wait_for_gateway(timeout_s=60):
             time.sleep(1)
 
 
-def cli(*args):
+def cli(*args, url=URL):
     """(exit code, stdout, stderr) of `python -m dpes.cli --url URL *args`."""
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        code = dpes_cli.main(["--url", URL, *args])
+        code = dpes_cli.main(["--url", url, *args])
     return code, out.getvalue(), err.getvalue()
 
 

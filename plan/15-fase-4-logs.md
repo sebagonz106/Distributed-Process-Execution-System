@@ -338,6 +338,45 @@ py -m dpes.cli logs <job_id> <task> -o 5000 -f
 - 2: job/task no encontrado (404)
 - 3: error de conexión / gateway inalcanzable
 
+**Al implementar (2026-11-20):**
+- Los tres códigos de fallo se resuelven en un solo sitio (`_failure_code`), no
+  dentro de cada ruta: el resto de comandos sigue devolviendo 3 para todo y la
+  asimetría queda declarada como deuda.
+- **`-n` es exacto, no una estimación por bytes.** El plan hablaba de calcular
+  `offset = tamaño - N·media_de_línea`, pero el tamaño no está expuesto por HTTP
+  y un offset adivinado puede empezar en mitad de una línea. `logs` pide desde
+  `-o` hasta el final y se queda con las últimas N líneas; cuesta memoria
+  proporcional al log, que es el límite ya conocido de §7. `-n 0` imprime todo.
+- `-f` **no** pone plazo propio: una compilación puede estar callada más tiempo
+  que cualquier plazo que se invente, y la pasarela cierra el flujo cuando el
+  intento cierra su log (D15.4). Ctrl+C sale con 0; una conexión medio abierta
+  solo se nota al escribir.
+- El flujo se lee con `read1`, que devuelve en cuanto hay bytes (un `read`
+  esperaría a llenar el búfer y la salida no sería en vivo), y se decodifica con
+  un decodificador incremental de UTF-8: un corte de fragmento puede caer dentro
+  de un carácter (D15.4).
+- `-n` junto a `-f` y un `-n` negativo se rechazan como error de uso: son
+  peticiones contradictorias, no algo que ignorar en silencio.
+- Se corrigió de paso una clasificación de la pasarela (Commit 4): `_serve_logs`
+  trataba **cualquier** `OSError` como «el cliente se fue», así que un fallo del
+  coordinador en esa ruta se quedaba sin respuesta (el cliente veía una conexión
+  cerrada) en vez de un 503. Ahora solo `BrokenPipeError` y
+  `ConnectionResetError` cuentan como cliente que se fue; lo demás llega como
+  503, que es lo que `logs` convierte en su código 1.
+- `tests/e2e/gateway_client.cli` acepta `url=` para poder probar el caso «no hay
+  pasarela» sin salir del contenedor.
+
+**Consecuencias:**
+
+- **Deuda declarada:** `status`, `artifacts` y `submit` siguen devolviendo 3
+  ante cualquier fallo de petición, 404 incluido. Unificarlos con D15.7 es
+  trabajo pendiente de un paso posterior; hasta entonces, la diferencia está
+  documentada aquí y en el docstring del CLI.
+- Un error de uso (por ejemplo `-n` junto a `-f`) sale con **2**, como
+  cualquier error de `argparse`; se distingue por el mensaje, no por el número.
+  Es una limitación de `argparse` que se asume, no se rodea.
+- `logs` no usa `Idempotency-Key`: es solo lectura.
+
 ---
 
 ### D15.8 — Contrato del cliente de almacenamiento (_StoreClient)
@@ -673,13 +712,14 @@ cliente que se va, y un cliente que abre y cierra conexiones agota los hilos de
 
 | Test | Qué verifica | Nivel |
 |------|--------------|-------|
-| \`test_live_tail_shows_output_while_running\` | \`logs -f\` imprime salida antes de que la tarea termine | E2E |
+| \`test_following_prints_while_the_task_still_runs\` | \`logs -f\` imprime salida antes de que la tarea termine | E2E |
 | \`test_logs_survive_worker_death\` | \`logs -o 0\` devuelve fragmentos tras \`docker kill worker\` | E2E |
 | \`test_events_shows_history\` | \`GET /events\` devuelve transiciones, clases, esperas | E2E |
-| \`test_offset_resumption\` | \`logs -o N\` retoma exactamente en byte N | E2E |
+| \`test_the_offset_resumes_at_that_byte\` | \`logs -o N\` retoma exactamente en byte N | E2E |
 | \`test_duplicate_fragment_ignored\` | LogStore ignora seq duplicado | Unit |
 | \`EventsTest\` | Cada transición genera el Event correcto (Commit 5) | Unit |
 | \`EventsApiTest\` | \`GET /jobs/{id}/events\`: orden, claves, hora ISO, 404 (Commit 6) | Unit |
+| \`LogsTest\` (test_cli) | \`logs\`: banderas, offset, \`-n\`, \`-f\` y códigos 0/1/2/3 (Commit 7) | Unit |
 | \`test_gateway_streaming_cleanup\` | Desconexión cliente limpia suscripción tail | Integration |
 
 ---
@@ -692,7 +732,7 @@ Al cerrar esta fase, actualizar tabla §2:
 |----|---------------|-------|--------|
 | R5 | Registro y transmisión de logs | 1, 4 | ✅ cumplido (C4, 2026-11-22) |
 
-Y añadir decisiones D15.1–D15.12 y D15.14 al registro de decisiones
+Y añadir decisiones D15.1–D15.12 y D15.14–D15.19 al registro de decisiones
 abiertas/cerradas (D15.13 queda para §7).
 
 ---
@@ -998,7 +1038,9 @@ transporte HTTP y `_Client.events`.
   el nombre; las cinco siguientes (tras reiniciar los contenedores y tras otra
   reconstrucción) dieron 300 OK, así que se anota como fallo no reproducido de
   las pruebas que dependen de tiempos en un clúster recién levantado, no como
-  algo de este cambio.
+  algo de este cambio. **Diagnosticado en el Commit 7:** era una carrera de las
+  pruebas con el orden en que la pasarela registraba lo que había servido (ver
+  Commit 7, «el orden de los registros»), no un fallo de los eventos.
 - Comprobación fuera de las pruebas, contra la pasarela real: un trabajo de dos
   tareas devolvió por HTTP cinco eventos en orden, con horas como
   `2026-11-20T03:47:21.963Z`, `task: null` en `JOB_FINISHED` y
@@ -1006,6 +1048,98 @@ transporte HTTP y `_Client.events`.
   coordinador y la misma petición devolvió el **mismo JSON**, byte a byte.
 
 **Siguiente:** Commit 7 (el comando `logs` del CLI), que consumirá este endpoint.
+
+---
+
+### Commit 7 — el comando `logs` del CLI (2026-11-20)
+
+**Qué hay:**
+
+- `dpes/cli.py`: subcomando `logs <job> <task> [-f] [-o N] [-n N]`. Sin `-f`
+  pide `GET /jobs/{job}/tasks/{task}/logs?offset=N` entero y se queda con las
+  últimas `-n` líneas; con `-f` pide `?follow=1&offset=N` y va escribiendo lo que
+  llega. Solo lectura: no manda `Idempotency-Key`.
+- **Códigos de salida (D15.7):** 0 si el log se sirvió o el seguimiento
+  acabó (fin del intento o Ctrl+C); 1 si la pasarela contestó 4xx/5xx que no es
+  404; 2 si es 404 (trabajo, tarea o intento inexistente); 3 si no hubo
+  respuesta. La distinción se calcula en un solo sitio (`_failure_code`) y solo
+  para `logs`: `status`, `artifacts` y `submit` siguen devolviendo 3 para todo
+  (deuda declarada en D15.7). Para poder mirar el código, `RequestFailed` pasa a
+  llevar `status`, y `_request` se parte en `_request`/`_open` porque el
+  seguimiento necesita la respuesta abierta, no el cuerpo leído.
+- El seguimiento lee con `read1` (devuelve en cuanto hay bytes; un `read`
+  esperaría a llenar el búfer y dejaría de ser en vivo) y decodifica con un
+  decodificador incremental de UTF-8, porque un corte de fragmento puede caer
+  dentro de un carácter (D15.4). No pone plazo propio: la pasarela cierra el
+  flujo cuando el intento cierra su log. Ctrl+C sale con 0.
+- `-n` es **exacto**, no una estimación por bytes: se pide desde `-o` y se
+  recortan las últimas N líneas. `-n 0` imprime todas. `-n` con `-f` y un `-n`
+  negativo son error de uso (siguen saliendo con 2, como todo `argparse`).
+- **Corrección en `dpes/gateway.py` (Commit 4):** `_serve_logs` trataba
+  **cualquier** `OSError` como «el cliente se fue», así que un fallo del
+  coordinador en esa ruta se quedaba sin respuesta (conexión cerrada) en vez de
+  un 503. Ahora solo `BrokenPipeError` y `ConnectionResetError` cuentan como
+  cliente que se fue; lo demás llega como 503, que el CLI convierte en su 1.
+- **Y el orden de los registros de la pasarela (Commit 4):** «logs served» y
+  «log followed» se escribían **después** de mandar el cuerpo, así que un
+  cliente que ya tenía la respuesta podía mirar los registros y no estar aún
+  el suyo. Eso hacía intermitentes las pruebas unitarias del Commit 4 (una vez
+  faltaba el registro, otra aparecía en la captura de la prueba siguiente), y es
+  el `FAILED (failures=1)` que quedó sin nombre en la verificación del Commit 6
+  (§ arriba): no era de aquel cambio. Ahora la pasarela registra **antes** de
+  mandar el último byte (y, en el seguimiento, antes del trozo final, con el
+  seguimiento registrado una sola vez, `_note_follow`); un fallo al escribir ese
+  trozo ya no se registra dos veces. Con eso, 40 pasadas seguidas de las
+  unitarias en Windows salen en verde, frente a una de cada seis antes.
+- `tests/unit/test_cli.py` espera el registro del seguimiento antes de volver
+  (`follow_cli`), y `tests/unit/test_gateway.py` hace lo mismo en las pruebas de
+  seguimiento: la ordenación de arriba ya basta, pero la espera documenta la
+  propiedad y protege del caso en que el cliente se va.
+- `tests/e2e/gateway_client.cli` acepta `url=` para probar «no hay pasarela» sin
+  salir del contenedor.
+
+**Pruebas:**
+
+| Lo que se afirma | Test que lo evidencia | Nivel |
+|------------------|-----------------------|-------|
+| El log entero sale y el comando acaba en 0 | `LogsTest.test_the_whole_log_is_printed_and_it_ends_well` | Unit |
+| `-o N` pide desde el byte N | `test_the_offset_asks_for_the_log_from_that_byte` | Unit |
+| `-n` se queda con las últimas líneas (`0`: todas; de más: todas) | `test_lines_keeps_the_end_of_the_log` | Unit |
+| `-n` cuenta desde el `-o` | `test_lines_counts_from_the_offset` | Unit |
+| `-f` imprime lo que llega, y no hace petición de lectura entera | `test_following_prints_the_log_as_it_comes` | Unit |
+| `-f -o N` pide el seguimiento desde N | `test_following_from_an_offset_asks_from_there` | Unit |
+| Un carácter partido entre fragmentos se imprime entero | `test_a_character_split_between_fragments_is_printed_whole` | Unit |
+| Ctrl+C corta el seguimiento con 0 | `test_ctrl_c_stops_a_follow_without_an_error` | Unit |
+| Trabajo, tarea o intento inexistente → 2 (404) | `test_an_unknown_job_is_not_found`, `test_an_unknown_task_is_not_found`, `test_a_task_that_never_ran_is_not_found` | Unit |
+| Un 4xx/5xx que no es 404 → 1 | `test_any_other_refusal_of_the_gateway_is_one` | Unit |
+| Un coordinador que falla → 1 (503), no un corte | `test_a_coordinator_that_breaks_is_one` | Unit |
+| Sin respuesta de la pasarela → 3 | `test_a_gateway_that_cannot_answer_at_all_is_three` | Unit |
+| `-n` con `-f` y `-n` negativo son error de uso (2, sin petición) | `test_lines_and_follow_together_are_a_usage_error`, `test_a_negative_line_count_is_a_usage_error` | Unit |
+| Un coordinador que falla en la ruta de logs es 503, no un corte | `LogApiTest.test_a_coordinator_that_breaks_is_unavailable_not_a_cut` | Unit |
+| El registro de lo servido existe ya cuando el cliente ve el cuerpo | `LogApiTest.test_serving_a_log_is_logged_with_its_execution`, `test_a_follow_that_reaches_the_end_says_so` | Unit |
+| El log de un intento acabado se sirve entero | `test_the_log_of_a_finished_attempt_is_served_whole` | E2E |
+| `-o N` retoma exactamente en el byte N | `test_the_offset_resumes_at_that_byte` | E2E |
+| `-n` recorta el final | `test_lines_keeps_the_end_of_the_log` | E2E |
+| El log de una tarea fallida también se sirve | `test_the_log_of_a_failed_task_is_served_too` | E2E |
+| `-f` imprime **antes** de que la tarea termine | `test_following_prints_while_the_task_still_runs` | E2E |
+| Un trabajo o tarea inexistente → 2 (404) | `test_a_job_or_task_that_does_not_exist_is_not_found` | E2E |
+| Una petición rechazada → 1 (400) | `test_a_refused_request_is_one` | E2E |
+| Una pasarela que no está → 3 | `test_a_gateway_that_is_not_there_is_three` | E2E |
+
+**Verificación (2026-11-20, clúster de tres nodos):**
+
+- `py -W error -m unittest discover -s tests/unit` → 269 pruebas OK (2 saltadas),
+  y **40 pasadas seguidas** en verde tras ordenar los registros de la pasarela.
+- En el nodo de control, reconstruida la imagen: `python -W error -m unittest
+  discover -s tests/unit` → 317 OK; `tests/integration` → 35 OK; `tests/e2e` →
+  31 OK; `tests/host` → 8 OK.
+- Comprobación manual fuera de las pruebas, contra la pasarela real, con un
+  trabajo `echo one; echo two`: log entero → `one\ntwo\n` y 0; `-o 4` → `two` y
+  0; `-n 1` → `two` y 0; tarea inexistente → `HTTP 404: unknown task` y 2;
+  `--url http://127.0.0.1:9` → `cannot reach the gateway` y 3; `-o -1` →
+  `HTTP 400: offset: a whole number` y 1.
+
+**Siguiente:** Commit 8 (ampliación de las pruebas unitarias de la fase).
 
 ---
 
