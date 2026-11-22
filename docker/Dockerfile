@@ -8,6 +8,10 @@ RUN apt-get update \
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
+# coverage only for messuring in CI, not intended for the final system (plan/15 D15.20).
+COPY requirements-dev.txt /tmp/requirements-dev.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-dev.txt
+
 # Ray reports usage statistics by default; this project sends none.
 # PYTHONPATH lets the processes Ray starts on every node import dpes (D07.11).
 ENV RAY_USAGE_STATS_ENABLED=0 \

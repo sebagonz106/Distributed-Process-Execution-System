@@ -57,6 +57,19 @@ def wait(job_id):
     return code, json.loads(out)
 
 
+def events(job_id):
+    """The feed of `job_id` (plan/15, D15.5), as the gateway serves it."""
+    try:
+        with urllib.request.urlopen(f"{URL}/jobs/{job_id}/events",
+                                    timeout=10) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as error:
+        with error:
+            raise AssertionError(
+                f"the feed of {job_id} failed: HTTP {error.code}"
+            ) from None
+
+
 def run_job(tasks):
     code, job_id, err = submit(tasks)
     if code != 0:

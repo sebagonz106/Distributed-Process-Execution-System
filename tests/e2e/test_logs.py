@@ -12,7 +12,7 @@ import sys
 import time
 import unittest
 
-from gateway_client import URL, cli, submit, wait, wait_for_gateway
+from gateway_client import URL, cli, events, submit, wait, wait_for_gateway
 
 CLI = [sys.executable, "-m", "dpes.cli"]
 
@@ -141,6 +141,49 @@ class LogsTest(unittest.TestCase):
 
         self.assertEqual(3, code, err)
         self.assertIn("cannot reach", err)
+
+    def test_the_log_outlives_the_executor_that_wrote_it(self):
+        # The process prints, saves its result and dies before answering (R7):
+        # what it wrote sits in the control node, so the log is still served.
+        view = self.run_job({"t": {
+            "command": ["sh", "-c", "echo before"],
+            "env": {"DPES_FAULT": "lose-ack:1"},
+        }})
+
+        code, out, err = cli("logs", view["job_id"], "t", "-o", "0")
+
+        self.assertEqual((0, "before\n"), (code, out), err)
+        self.assertEqual(1, len(view["tasks"]["t"]["attempts"]))
+
+    def test_the_feed_tells_the_history_of_a_retried_task(self):
+        view = self.run_job({"t": {
+            "command": ["sh", "-c", "echo ran"],
+            "env": {"DPES_FAULT": "network:1"},
+        }})
+
+        feed = events(view["job_id"])
+
+        self.assertEqual(
+            ["TASK_LAUNCHED", "ATTEMPT_FAILED", "RETRY_SCHEDULED",
+             "ATTEMPT_SUCCEEDED", "JOB_FINISHED"],
+            [event["type"] for event in feed],
+        )
+        failed, retry, again = feed[1], feed[2], feed[3]
+        self.assertEqual("NETWORK", failed["payload"]["failure_class"])
+        self.assertEqual("RETRY_WAIT", failed["payload"]["state"])
+        self.assertGreater(retry["payload"]["retry_in_s"], 0)
+        self.assertEqual(retry["payload"]["next_execution_id"],
+                         again["execution_id"])
+        end = feed[-1]
+        self.assertEqual((None, ""), (end["task"], end["execution_id"]))
+        self.assertEqual({"state": "SUCCEEDED", "counts": {"succeeded": 1}},
+                         end["payload"])
+        # Ordered as it happened, in ISO 8601 UTC with milliseconds (D15.5).
+        stamps = [event["timestamp"] for event in feed]
+        self.assertEqual(sorted(stamps), stamps)
+        self.assertRegex(stamps[0],
+                         r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$")
+        self.assertEqual({view["job_id"]}, {event["job_id"] for event in feed})
 
 
 if __name__ == "__main__":

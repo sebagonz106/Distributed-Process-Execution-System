@@ -1126,20 +1126,48 @@ transporte HTTP y `_Client.events`.
 | Una petición rechazada → 1 (400) | `test_a_refused_request_is_one` | E2E |
 | Una pasarela que no está → 3 | `test_a_gateway_that_is_not_there_is_three` | E2E |
 
-**Verificación (2026-11-20, clúster de tres nodos):**
+**Verificación (2026-11-20 → 2026-11-21, clúster de tres nodos):**
 
-- `py -W error -m unittest discover -s tests/unit` → 269 pruebas OK (2 saltadas),
-  y **40 pasadas seguidas** en verde tras ordenar los registros de la pasarela.
-- En el nodo de control, reconstruida la imagen: `python -W error -m unittest
-  discover -s tests/unit` → 317 OK; `tests/integration` → 35 OK; `tests/e2e` →
-  31 OK; `tests/host` → 8 OK.
+- `py -W error -m unittest discover -s tests/unit` → 273 pruebas OK (2
+  saltadas) en Windows; **40 pasadas seguidas** en verde tras ordenar los
+  registros de la pasarela (el `FAILED (failures=1)` sin nombre del Commit 6
+  era una carrera de ese orden, corregida en C7).
+- En el nodo de control, imagen reconstruida: `python -W error -m unittest
+  discover -s tests/unit` → 321 OK; `tests/integration` → 35 OK;
+  `tests/e2e` → 33 OK; `tests/host` → 9 OK.
+- Cobertura (plan/15 D15.20, `coverage.py` solo de desarrollo/CI): `dpes/
+  logstore.py` 100 %, `dpes/scheduler.py` 100 % (0 de 359 sentencias sin
+  probar), umbral 90 % en CI.
 - Comprobación manual fuera de las pruebas, contra la pasarela real, con un
-  trabajo `echo one; echo two`: log entero → `one\ntwo\n` y 0; `-o 4` → `two` y
-  0; `-n 1` → `two` y 0; tarea inexistente → `HTTP 404: unknown task` y 2;
+  trabajo `echo one; echo two`: log entero → `one\ntwo\n` y 0; `-o 4` → `two`
+  y 0; `-n 1` → `two` y 0; tarea inexistente → `HTTP 404: unknown task` y 2;
   `--url http://127.0.0.1:9` → `cannot reach the gateway` y 3; `-o -1` →
   `HTTP 400: offset: a whole number` y 1.
 
-**Siguiente:** Commit 8 (ampliación de las pruebas unitarias de la fase).
+**Commits 8-10 (ampliación de pruebas y corte C4, 2026-11-21):**
+
+- Commit 8, pruebas unitarias: `tests/unit/test_logstore.py` (tope de fragmento
+  de 4 GiB, id de ejecución demasiado largo para la cabecera, lectura que se
+  detiene al alcanzar el límite) y `tests/unit/test_scheduler.py` (fallo por
+  salida declarada ausente). `dpes/logstore.py` y `dpes/scheduler.py` al 100 %
+  de cobertura. CI mide con `coverage.py` (`requirements-dev.txt`,
+  `docker/Dockerfile`, `.github/workflows/ci.yml`).
+- Commit 9, pruebas de integración: ya existían `tests/integration/
+  test_logstore.py` y `tests/integration/test_coordinator.py` (LogStore actor,
+  emisión del ejecutor, feed que sobrevive al reinicio); pasan en el clúster
+  (35 OK). Ninguna nueva necesaria para C4.
+- Commit 10, extremo a extremo (corte C4): `tests/e2e/test_logs.py` añade
+  `test_the_log_outlives_the_executor_that_wrote_it` (log servido tras
+  `lose-ack`, R7) y `test_the_feed_tells_the_history_of_a_retried_task`
+  (feed ordenado con `TASK_LAUNCHED`, `ATTEMPT_FAILED`, `RETRY_SCHEDULED`,
+  `ATTEMPT_SUCCEEDED`, `JOB_FINISHED`, horas ISO 8601 UTC con ms, D15.5);
+  `tests/e2e/gateway_client.py` expone `events()`; `tests/host/
+  test_worker_loss.py` añade `test_the_log_of_an_attempt_survives_the_death_
+  of_its_worker` (muerte real del contenedor, `docker kill`, y `live_nodes`
+  parsea el entero de Ray de forma robusta). C4 verde (33 e2e + 9 host).
+
+**Siguiente:** Commit 11 (diagramas y trazabilidad final).
+
 
 ---
 

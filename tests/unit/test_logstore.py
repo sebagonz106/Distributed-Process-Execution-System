@@ -9,10 +9,20 @@ import time
 import unittest
 from unittest import mock
 
-from dpes.logstore import LogDir, tail
+from dpes.logstore import LogDir, tail, _MAX_DATA, _MAX_ID
 
 EID = "job-1/compile/0/1"
 OTHER = "job-1/link/0/1"
+
+
+class _Huge:
+    """A fragment over the ceiling that does not hold 4 GiB to prove it."""
+
+    def __len__(self):
+        return _MAX_DATA + 1
+
+    def __bool__(self):
+        return True
 
 
 class _Short:
@@ -106,6 +116,13 @@ class LogDirTest(unittest.TestCase):
         self.assertEqual([(1, b"lo\n"), (2, b"wor")],
                          self.logs.read(EID, 3, 6))
 
+    def test_reading_stops_once_the_limit_is_reached(self):
+        # The fragments after the requested bytes are not even opened (D15.2).
+        self.logs.append(EID, 1, b"hello\n")
+        self.logs.append(EID, 2, b"world\n")
+
+        self.assertEqual([(1, b"ell")], self.logs.read(EID, 1, 3))
+
     def test_an_offset_at_the_end_or_past_it_reads_nothing(self):
         self.logs.append(EID, 1, b"hola\n")
 
@@ -134,6 +151,20 @@ class LogDirTest(unittest.TestCase):
             self.logs.append(EID, 0, b"hola\n")
 
         self.assertEqual([], self.logs.read(EID, 0))
+
+    def test_a_fragment_over_the_ceiling_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.logs.append(EID, 1, _Huge())
+
+        self.assertEqual([], self.logs.read(EID, 0))
+
+    def test_an_execution_id_that_does_not_fit_the_header_is_refused(self):
+        huge = "t" * (_MAX_ID + 1)
+
+        with self.assertRaises(ValueError):
+            self.logs.append(huge, 1, b"hola\n")
+
+        self.assertEqual([], self.logs.read(huge, 0))
 
     def test_fragments_survive_reopening(self):
         self.logs.append(EID, 1, b"one\n")

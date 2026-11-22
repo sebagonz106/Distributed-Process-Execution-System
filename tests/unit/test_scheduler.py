@@ -21,8 +21,10 @@ def make_job(*names, retries=None, rand=0.5, clock=None):
     return Job("job-1", JobSpec(tasks), rand=lambda: rand, clock=clock)
 
 
-def result(execution_id, exit_code=0, timed_out=False, output_tail=""):
+def result(execution_id, exit_code=0, timed_out=False, output_tail="",
+           missing_outputs=()):
     return TaskResult(execution_id, exit_code, timed_out, {},
+                      missing_outputs=missing_outputs,
                       output_tail=output_tail)
 
 
@@ -519,6 +521,18 @@ class EventsTest(unittest.TestCase):
         self.assertEqual("ATTEMPT_FAILED", event.type)
         self.assertEqual(
             ("WORKER", "WorkerCrashedError"),
+            (event.payload["failure_class"], event.payload["reason"]),
+        )
+
+    def test_a_declared_output_that_never_appeared_is_the_reason(self):
+        eid = self.start()
+
+        self.job.on_result(result(eid, missing_outputs=("salida.txt", "otra")))
+
+        event = self.job.events()[-1]
+        self.assertEqual("ATTEMPT_FAILED", event.type)
+        self.assertEqual(
+            ("TASK", "declared outputs missing: salida.txt, otra"),
             (event.payload["failure_class"], event.payload["reason"]),
         )
 
