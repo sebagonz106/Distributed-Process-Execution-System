@@ -48,6 +48,7 @@ class TaskResult:
     outputs: Mapping[str, str]  # declared path -> digest, only those produced
     missing_outputs: tuple[str, ...] = ()
     output_tail: str = ""  # last bytes of stdout and stderr (plan/07, D07.14)
+    log_truncated: bool = False  # the log stopped at its ceiling (D15.13)
 
     @property
     def succeeded(self) -> bool:

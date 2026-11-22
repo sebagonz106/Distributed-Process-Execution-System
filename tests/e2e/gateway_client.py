@@ -70,6 +70,17 @@ def events(job_id):
             ) from None
 
 
+def log_size(job_id, task):
+    """Bytes stored for the task's attempt, read from the range reply
+    (plan/15, D15.15) so a huge log need not be downloaded to measure it."""
+    request = urllib.request.Request(
+        f"{URL}/jobs/{job_id}/tasks/{task}/logs",
+        headers={"Range": "bytes=0-0"},
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return int(response.headers["Content-Range"].rsplit("/", 1)[1])
+
+
 def run_job(tasks):
     code, job_id, err = submit(tasks)
     if code != 0:

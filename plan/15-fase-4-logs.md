@@ -4,7 +4,7 @@
 - **Estado:** en curso (Commit 2: actor `LogStore` y su núcleo en disco)
 - **Paso:** Fase 4 de [03-fases-y-dependencias.md](03-fases-y-dependencias.md)
 - **Requisito:** R5 (registro y transmisión de logs)
-- **Corte:** C4 — \`logs -f\` muestra líneas mientras la tarea corre; tras matar el worker a mitad, lo emitido sigue consultable; \`events\` muestra historial con execution IDs, transiciones, clases de fallo y esperas de reintento
+- **Corte:** C4 — `logs -f` muestra líneas mientras la tarea corre; tras matar el worker a mitad, lo emitido sigue consultable; `events` muestra historial con execution IDs, transiciones, clases de fallo y esperas de reintento
 
 ## 1. Alcance
 
@@ -12,7 +12,7 @@
 |---------|-----|--------|
 | F5.1 | Captura de stdout/stderr de la tarea | ✅ Ya existe (output_tail 64 KiB, D07.14) |
 | F5.2 | Envío incremental durante la ejecución, en fragmentos numerados | 🟡 Este documento |
-| F5.3 | Consulta por desplazamiento y seguimiento en vivo (\`logs -f\`) | 🟡 Este documento |
+| F5.3 | Consulta por desplazamiento y seguimiento en vivo (`logs -f`) | 🟡 Este documento |
 | F5.4 | Lo transmitido sobrevive a la muerte del worker | 🟡 Este documento |
 | F5.5 | Historial de eventos del trabajo: transiciones, intentos, clase de fallo y decisión de reintento, correlacionados por execution ID | 🟡 Este documento |
 | F5.6 | En acierto de caché se sirve el log de la ejecución original | 🟡 Fase 7 (depende de este) |
@@ -33,37 +33,37 @@
 **Decisión:** Opción 1 — secuencia global por execution_id (enteros 1, 2, 3...).
 
 **Porqué:**
-- La idempotencia en el almacén (D15.2) requiere una clave simple: \`(execution_id, seq)\` como clave primaria.
+- La idempotencia en el almacén (D15.2) requiere una clave simple: `(execution_id, seq)` como clave primaria.
 - Permite al cliente pedir "desde seq N" y al almacén ignorar duplicados exactos.
 - El orden natural de enteros coincide con el orden causal de emisión.
 - Mínima sobrecarga: 4-8 bytes por fragmento en metadatos.
 
 **Consecuencias:**
 - El ejecutor debe mantener contador local por intento y persistirlo si se reiniciara (no aplica: el ejecutor no se reinicia a mitad de intento).
-- El almacén debe rechazar/ignorar escrituras con \`seq <= max_seq_existente\` para ese execution_id.
+- El almacén debe rechazar/ignorar escrituras con `seq <= max_seq_existente` para ese execution_id.
 
 ---
 
 ### D15.2 — Persistencia del almacén de logs (LogStore)
 
-**Contexto:** Los fragmentos deben sobrevivir a la muerte del worker (F5.4) y estar disponibles para consulta por offset y streaming en vivo (F5.3). El volumen \`dpes-data\` en el nodo de control ya existe y persiste entre reinicios de contenedor.
+**Contexto:** Los fragmentos deben sobrevivir a la muerte del worker (F5.4) y estar disponibles para consulta por offset y streaming en vivo (F5.3). El volumen `dpes-data` en el nodo de control ya existe y persiste entre reinicios de contenedor.
 
 **Opciones consideradas:**
-1. **Archivo por intento:** \`/var/lib/dpes/logs/{execution_id}.log\` — escritura append-only, índice en memoria (mapa seq → byte_offset). Lectura por offset = seek directo.
-2. **SQLite:** Tabla \`fragments(execution_id, seq, data, offset)\`. Transacciones ACID, consultas flexibles, pero más overhead por fragmento.
-3. **Archivo por fragmento:** \`/var/lib/dpes/logs/{execution_id}/seq_{N}.chunk\`. Simple pero muchos inodes y syscalls.
+1. **Archivo por intento:** `/var/lib/dpes/logs/{execution_id}.log` — escritura append-only, índice en memoria (mapa seq → byte_offset). Lectura por offset = seek directo.
+2. **SQLite:** Tabla `fragments(execution_id, seq, data, offset)`. Transacciones ACID, consultas flexibles, pero más overhead por fragmento.
+3. **Archivo por fragmento:** `/var/lib/dpes/logs/{execution_id}/seq_{N}.chunk`. Simple pero muchos inodes y syscalls.
 
-**Decisión:** Opción 1 — un archivo por intento (\`{execution_id}.log\`) con índice en memoria reconstruido al abrir.
+**Decisión:** Opción 1 — un archivo por intento (`{execution_id}.log`) con índice en memoria reconstruido al abrir.
 
 **Porqué:**
 - Append-only es el patrón de acceso natural (escritura secuencial, lectura por offset).
 - Seek en archivo es O(1) y extremadamente rápido; no hace falta B-tree para este caso de uso.
 - Un archivo por intento = limpieza trivial (borrar archivo = borrar logs de un intento).
 - Evita overhead de SQLite (parseo SQL, transacciones) para un workload de "write once, read many" simple.
-- El volumen \`dpes-data\` ya está montado en \`/var/lib/dpes\`; solo crear subdirectorio \`logs/\`.
+- El volumen `dpes-data` ya está montado en `/var/lib/dpes`; solo crear subdirectorio `logs/`.
 
 **Consecuencias:**
-- El índice en memoria (mapa \`seq -> file_offset\`) se reconstruye escaneando el archivo al abrir (rápido: lectura secuencial una sola vez).
+- El índice en memoria (mapa `seq -> file_offset`) se reconstruye escaneando el archivo al abrir (rápido: lectura secuencial una sola vez).
 - Tamaño máximo de archivo = salida total de la tarea. Si una tarea produce GBs, el archivo crece sin límite (documentar como límite conocido, F5.4 cubre supervivencia, no rotación).
 - El índice también crece con los fragmentos, no solo con los bytes: cada
   fragmento añade una tupla `(seq, desplazamiento en la salida, longitud)` a la
@@ -88,7 +88,7 @@
 ...
 ```
 - Binario, little-endian. Permite parsing rápido y seek exacto.
-- \`data\` = bytes raw de stdout/stderr (UTF-8 válido asumido, pero almacenamos bytes).
+- `data` = bytes raw de stdout/stderr (UTF-8 válido asumido, pero almacenamos bytes).
 
 ---
 
@@ -101,13 +101,13 @@
 2. **Asyncio + aiofiles:** Requiere que el ejecutor sea async; hoy es síncrono (D07.17). Cambio mayor.
 3. **Polling desde el coordinador:** El coordinador pide fragmentos al ejecutor. Invierte dependencias, añade latencia y complejidad.
 
-**Decisión:** Opción 1 — hilo dedicado (\`threading.Thread\`) en el ejecutor.
+**Decisión:** Opción 1 — hilo dedicado (`threading.Thread`) en el ejecutor.
 
 **Porqué:**
 - El ejecutor ya es síncrono y no conoce asyncio; un hilo es el cambio mínimo.
-- \`threading\` está en la biblioteca estándar (sin dependencias extra).
+- `threading` está en la biblioteca estándar (sin dependencias extra).
 - El hilo puede ser daemon: si el proceso principal termina, el hilo muere sin bloquear.
-- Permite batching configurable: \`flush_bytes=4096\`, \`flush_lines=100\`, \`flush_interval_ms=500\` (lo que ocurra primero).
+- Permite batching configurable: `flush_bytes=4096`, `flush_lines=100`, `flush_interval_ms=500` (lo que ocurra primero).
 
 **Detalles de implementación:**
 ```python
@@ -136,8 +136,8 @@ class LogEmitter:
 ```
 
 **Consecuencias:**
-- El ejecutor debe importar \`threading\` (ya lo hace para \`signal\` en sandbox).
-- El cliente de almacenamiento (\`_StoreClient\`) gana método \`append_fragment(execution_id, seq, data)\`.
+- El ejecutor debe importar `threading` (ya lo hace para `signal` en sandbox).
+- El cliente de almacenamiento (`_StoreClient`) gana método `append_fragment(execution_id, seq, data)`.
 - Si el hilo falla al enviar (red, store caído), loggea warning y reintenta con backoff simple (3 intentos, 0.5s). No bloquea la ejecución del comando.
 - El comando y el emisor no pueden compartir un descriptor con una sola posición: el ejecutor crea el archivo de salida, lo deja sin nombre (`unlink` inmediato) y lo lee por un segundo descriptor con posición propia. Sandbox pasa a aceptar el archivo del llamante (`sink`) en vez de crear siempre el suyo.
 - Un almacén que no acepta un fragmento ni tras los tres reintentos se da por caído: el emisor deja de enviar el resto de ese intento (un log no puede tumbar un trabajo) y lo declara con un `WARNING` con `execution=` y `lost=`. Reintentar cada fragmento de un almacén muerto solo retrasaría la tarea.
@@ -147,14 +147,14 @@ class LogEmitter:
 
 ### D15.4 — API de logs en la pasarela (Gateway)
 
-**Contexto:** El cliente necesita consultar logs por offset (histórico) y seguirlos en vivo (\`logs -f\`). La pasarela es el único punto de entrada HTTP (puerto 8000).
+**Contexto:** El cliente necesita consultar logs por offset (histórico) y seguirlos en vivo (`logs -f`). La pasarela es el único punto de entrada HTTP (puerto 8000).
 
 **Opciones consideradas:**
-1. **Dos endpoints separados:** \`GET /logs?offset=N&limit=M\` y \`GET /logs?follow=1\`.
-2. **Un endpoint con query params:** \`GET /logs?offset=N&limit=M&follow=0/1\`.
-3. **Range header HTTP estándar:** \`GET /logs\` con \`Range: bytes=START-\` y \`Accept: text/plain\`; streaming con \`Transfer-Encoding: chunked\`.
+1. **Dos endpoints separados:** `GET /logs?offset=N&limit=M` y `GET /logs?follow=1`.
+2. **Un endpoint con query params:** `GET /logs?offset=N&limit=M&follow=0/1`.
+3. **Range header HTTP estándar:** `GET /logs` con `Range: bytes=START-` y `Accept: text/plain`; streaming con `Transfer-Encoding: chunked`.
 
-**Decisión:** Opción 2 (un endpoint con params) + soporte opcional de \`Range\` header (Opción 3 como bonus).
+**Decisión:** Opción 2 (un endpoint con params) + soporte opcional de `Range` header (Opción 3 como bonus).
 
 **Endpoints:**
 ```http
@@ -174,10 +174,10 @@ GET /jobs/{job_id}/tasks/{task}/logs?follow=1&offset={n}
 ```
 
 **Formato de respuesta (ambos):**
-- \`text/plain; charset=utf-8\` — bytes directos de stdout/stderr.
+- `text/plain; charset=utf-8` — bytes directos de stdout/stderr.
 - El cliente reconstruye líneas; no añadimos delimitadores extra.
 
-**Soporte \`Range\` (bonus, no bloqueante):**
+**Soporte `Range` (bonus, no bloqueante):**
 ```http
 GET /jobs/{job_id}/tasks/{task}/logs
 Range: bytes=1000-
@@ -186,13 +186,13 @@ Range: bytes=1000-
 Útil para clientes HTTP genéricos (curl, wget).
 
 **Manejo de desconexión en streaming:**
-- El handler detecta \`GeneratorExit\` / \`BrokenPipeError\` / \`ConnectionResetError\`.
-- Al detectar, cancela la suscripción al \`tail_fragments\` del LogStore y libera recursos.
+- El handler detecta `GeneratorExit` / `BrokenPipeError` / `ConnectionResetError`.
+- Al detectar, cancela la suscripción al `tail_fragments` del LogStore y libera recursos.
 - No deja hilos/corutinas huérfanas.
 
 **Consecuencias:**
-- La pasarela necesita acceso al actor \`LogStore\` (ya tiene acceso al \`BlobStore\` y \`Coordinator\`).
-- \`RAY_DEDUP_LOGS=0\` en compose (ya configurado, D10.7) evita que Ray fusione líneas de distintos intentos.
+- La pasarela necesita acceso al actor `LogStore` (ya tiene acceso al `BlobStore` y `Coordinator`).
+- `RAY_DEDUP_LOGS=0` en compose (ya configurado, D10.7) evita que Ray fusione líneas de distintos intentos.
 
 **Refinada por D15.15**: qué intento se sirve cuando la ruta nombra la
 tarea, `Range` con 206/416 y `Content-Range` exacto, `Connection: close` con
@@ -206,7 +206,7 @@ inactividad).
 
 **Contexto:** F5.5 requiere historial de eventos del trabajo: transiciones de estado, intentos, clase de fallo, decisión de reintento, correlacionados por execution ID. Ya existe el historial de intentos en la vista del trabajo (D09.6), pero F5.5 pide un feed cronológico unificado servido por HTTP.
 
-**Decisión:** Endpoint \`GET /jobs/{job_id}/events\` que devuelve array JSON ordenado cronológicamente.
+**Decisión:** Endpoint `GET /jobs/{job_id}/events` que devuelve array JSON ordenado cronológicamente.
 
 **Esquema de evento:**
 ```json
@@ -226,17 +226,17 @@ inactividad).
 }
 ```
 
-**Tipos de evento y cuándo se emiten (desde \`scheduler.Job\`, D15.6):**
+**Tipos de evento y cuándo se emiten (desde `scheduler.Job`, D15.6):**
 | Tipo | Cuándo | Payload clave |
 |------|--------|---------------|
-| \`TASK_LAUNCHED\` | \`start()\` o \`_launch()\` | \`state: "RUNNING"\` |
-| \`ATTEMPT_SUCCEEDED\` | \`on_result()\` con éxito | \`state: "SUCCEEDED", exit_code\` |
-| \`ATTEMPT_FAILED\` | \`on_result()\` fallo tarea / \`on_failure()\` | \`failure_class, reason, retry_in_s\` |
-| \`RETRY_SCHEDULED\` | \`_failed()\` programa reintento | \`failure_class, retry_in_s, next_execution_id\` |
-| \`TASK_SKIPPED\` | \`_skip_dependents_of()\` (añadido por D15.17) | \`state: "SKIPPED", reason\` |
-| \`JOB_FINISHED\` | \`Job.finished()\`, llamado por el coordinador | \`state: "SUCCEEDED|FAILED|ERROR", counts\` |
+| `TASK_LAUNCHED` | `start()` o `_launch()` | `state: "RUNNING"` |
+| `ATTEMPT_SUCCEEDED` | `on_result()` con éxito | `state: "SUCCEEDED", exit_code` |
+| `ATTEMPT_FAILED` | `on_result()` fallo tarea / `on_failure()` | `failure_class, reason, retry_in_s` |
+| `RETRY_SCHEDULED` | `_failed()` programa reintento | `failure_class, retry_in_s, next_execution_id` |
+| `TASK_SKIPPED` | `_skip_dependents_of()` (añadido por D15.17) | `state: "SKIPPED", reason` |
+| `JOB_FINISHED` | `Job.finished()`, llamado por el coordinador | `state: "SUCCEEDED|FAILED|ERROR", counts` |
 
-**Persistencia:** Los eventos viven en memoria en \`scheduler.Job._events\` y se reconstruyen al reiniciar el coordinador vía journal (D14.1). El endpoint \`events()\` del actor coordinador lee \`job._events\`. D15.16 fija cómo se conserva la hora y D15.17 la forma final del evento.
+**Persistencia:** Los eventos viven en memoria en `scheduler.Job._events` y se reconstruyen al reiniciar el coordinador vía journal (D14.1). El endpoint `events()` del actor coordinador lee `job._events`. D15.16 fija cómo se conserva la hora y D15.17 la forma final del evento.
 
 **Consecuencias:**
 - Los eventos son **datos**, no logs operativos (D10.4). Los módulos puros no logean; el coordinador emite eventos como estructuras de datos.
@@ -265,9 +265,9 @@ inactividad).
 
 ### D15.6 — Emisión de eventos desde el scheduler (núcleo puro)
 
-**Contexto:** La máquina de estados pura (\`scheduler.Job\`) debe emitir eventos de datos (no logs) en cada transición relevante. Estos eventos alimentan el endpoint \`/events\` (D15.5) y complementan el historial de intentos (D09.6).
+**Contexto:** La máquina de estados pura (`scheduler.Job`) debe emitir eventos de datos (no logs) en cada transición relevante. Estos eventos alimentan el endpoint `/events` (D15.5) y complementan el historial de intentos (D09.6).
 
-**Decisión:** Extender \`scheduler.Job\` con lista \`_events\` y método \`_record_event(type, execution_id, **payload)\`.
+**Decisión:** Extender `scheduler.Job` con lista `_events` y método `_record_event(type, execution_id, **payload)`.
 
 **Implementación (forma final, refinada por D15.16 a D15.18):**
 ```python
@@ -301,17 +301,17 @@ class Job:
 ```
 
 **Consecuencias:**
-- \`scheduler.py\` sigue siendo **puro**: no importa \`time\`, no escribe disco, no usa Ray; el reloj entra por parámetro (D15.16).
+- `scheduler.py` sigue siendo **puro**: no importa `time`, no escribe disco, no usa Ray; el reloj entra por parámetro (D15.16).
 - Los tests unitarios verifican: cada transición emite evento correcto, payload completo, orden de inserción.
-- El coordinador (actor Ray) expone \`events(job_id)\` que devuelve \`job._events\` convertido a JSON serializable.
+- El coordinador (actor Ray) expone `events(job_id)` que devuelve `job._events` convertido a JSON serializable.
 
 ---
 
-### D15.7 — CLI: comando \`logs\`
+### D15.7 — CLI: comando `logs`
 
 **Contexto:** El usuario necesita consultar logs históricos y seguirlos en vivo desde la línea de comandos.
 
-**Decisión:** Nuevo subcomando \`logs\` con flags \`-f/--follow\`, \`-o/--offset\`, \`-n/--lines\`.
+**Decisión:** Nuevo subcomando `logs` con flags `-f/--follow`, `-o/--offset`, `-n/--lines`.
 
 **Uso:**
 ```bash
@@ -328,9 +328,9 @@ py -m dpes.cli logs <job_id> <task> -f
 py -m dpes.cli logs <job_id> <task> -o 5000 -f
 ```
 
-**Implementación en \`dpes/cli.py\`:**
-- \`follow=False\`: \`GET /jobs/{id}/tasks/{task}/logs?offset={o}&limit={n}\` → imprime cuerpo y sale.
-- \`follow=True\`: \`GET /jobs/{id}/tasks/{task}/logs?follow=1&offset={o}\` con \`stream=True\` → itera chunks e imprime en tiempo real. Maneja \`KeyboardInterrupt\` limpio.
+**Implementación en `dpes/cli.py`:**
+- `follow=False`: `GET /jobs/{id}/tasks/{task}/logs?offset={o}&limit={n}` → imprime cuerpo y sale.
+- `follow=True`: `GET /jobs/{id}/tasks/{task}/logs?follow=1&offset={o}` con `stream=True` → itera chunks e imprime en tiempo real. Maneja `KeyboardInterrupt` limpio.
 
 **Códigos de salida:**
 - 0: éxito
@@ -381,9 +381,9 @@ py -m dpes.cli logs <job_id> <task> -o 5000 -f
 
 ### D15.8 — Contrato del cliente de almacenamiento (_StoreClient)
 
-**Contexto:** El ejecutor y la pasarela necesitan hablar con el actor \`LogStore\`. El patrón existente (\`_StoreClient\` en \`coordinator.py\`) envuelve llamadas Ray con timeouts.
+**Contexto:** El ejecutor y la pasarela necesitan hablar con el actor `LogStore`. El patrón existente (`_StoreClient` en `coordinator.py`) envuelve llamadas Ray con timeouts.
 
-**Decisión:** Añadir método \`append_fragment(execution_id, seq, data)\` a \`_StoreClient\`.
+**Decisión:** Añadir método `append_fragment(execution_id, seq, data)` a `_StoreClient`.
 
 ```python
 class _StoreClient:
@@ -393,17 +393,17 @@ class _StoreClient:
         return ray.get(reply, timeout=CALL_TIMEOUT_S)
 ```
 
-**Timeout:** \`CALL_TIMEOUT_S = 10\` (igual que otras llamadas). Si falla, el hilo emisor del ejecutor reintenta 3× con backoff 0.5s (D15.3).
+**Timeout:** `CALL_TIMEOUT_S = 10` (igual que otras llamadas). Si falla, el hilo emisor del ejecutor reintenta 3× con backoff 0.5s (D15.3).
 
 ---
 
 ### D15.9 — Manejo de deduplicación de logs de Ray
 
-**Contexto:** Ray por defecto deduplica líneas de log que difieren solo en números (D10.7). Los execution IDs contienen números (\`job/task/round/attempt\`), así que Ray fusionaría líneas de intentos distintos.
+**Contexto:** Ray por defecto deduplica líneas de log que difieren solo en números (D10.7). Los execution IDs contienen números (`job/task/round/attempt`), así que Ray fusionaría líneas de intentos distintos.
 
-**Decisión:** Confirmar \`RAY_DEDUP_LOGS=0\` en \`docker/compose.yaml\` para el servicio \`head\` (ya está, D10.7). Documentar en D15.1 que el almacén usa su propia secuencia, no la de Ray.
+**Decisión:** Confirmar `RAY_DEDUP_LOGS=0` en `docker/compose.yaml` para el servicio `head` (ya está, D10.7). Documentar en D15.1 que el almacén usa su propia secuencia, no la de Ray.
 
-**Verificación:** Test unitario en C1 que comprueba que dos intentos distintos con logs idénticos producen líneas separadas en \`docker logs dpes-head\`.
+**Verificación:** Test unitario en C1 que comprueba que dos intentos distintos con logs idénticos producen líneas separadas en `docker logs dpes-head`.
 
 ---
 
@@ -468,11 +468,11 @@ class _StoreClient:
 
 ### D15.10 — Módulos puros no registran logs (refuerzo D10.4)
 
-**Contexto:** D10.4 establece que \`spec\`, \`dag\`, \`failures\`, \`scheduler\`, \`messages\` no escriben logs operativos. La Fase 4 añade \`logstore\` (no puro) y extiende \`scheduler\` con eventos (datos, no logs).
+**Contexto:** D10.4 establece que `spec`, `dag`, `failures`, `scheduler`, `messages` no escriben logs operativos. La Fase 4 añade `logstore` (no puro) y extiende `scheduler` con eventos (datos, no logs).
 
-**Decisión:** Reafirmar D10.4. \`scheduler.Job._record_event\` emite **eventos de datos** (estructura \`Event\`), no llamadas a \`logging\`. La capa HTTP (\`gateway.py\`) y el coordinador (\`coordinator.py\`) son quienes logean eventos operativos si procede (p.ej., \`job finished\` ya se logea en D10.11).
+**Decisión:** Reafirmar D10.4. `scheduler.Job._record_event` emite **eventos de datos** (estructura `Event`), no llamadas a `logging`. La capa HTTP (`gateway.py`) y el coordinador (`coordinator.py`) son quienes logean eventos operativos si procede (p.ej., `job finished` ya se logea en D10.11).
 
-**Consecuencia:** Los tests unitarios de \`scheduler\` no necesitan capturar logs; verifican la lista \`_events\` directamente.
+**Consecuencia:** Los tests unitarios de `scheduler` no necesitan capturar logs; verifican la lista `_events` directamente.
 
 ---
 
@@ -564,7 +564,7 @@ puede distinguir «no hay más por ahora» de «no habrá más».
 1. **Nada:** el seguidor espera `IDLE_S`. Cero código; cinco minutos de espera
    al final de cada `logs -f` y ninguna forma de saber que el intento acabó.
 2. **Fragmento centinela con bytes reservados** (por ejemplo
-   `\x00DPES-EOF`): se mezcla con la salida, y una tarea puede escribir esos
+   `x00DPES-EOF`): se mezcla con la salida, y una tarea puede escribir esos
    mismos bytes, así que el lector no puede distinguirlos.
 3. **Bandera en la llamada** (`append_fragment(..., eof=True)`): cambia el
    contrato de D15.1/D15.8 y el formato en disco para guardar un booleano en
@@ -681,8 +681,10 @@ cliente que se va, y un cliente que abre y cierra conexiones agota los hilos de
   detectar la desconexión; lo que no queda es el hilo del handler ni la espera de
   cinco minutos.
 - Si un cliente deja de leer sin cerrar, la escritura se bloquea y la cola entre
-  ese hilo y el handler crece con la salida del intento: es otra cara del
-  crecimiento sin cota de §7 (D15.13, pendiente), no una garantía que se pierda.
+  ese hilo y el handler crece con la salida del intento. Ahora está acotada por
+  el tope del intento (§7.6, D15.13): la salida que se sirve no pasa de lo que
+  el intento guardó, y el comando que la produce muere en el tope del
+  trabajador.
 - Los bytes que se sirven son los fragmentos tal cual: un lector que decodifique
   UTF-8 debe hacerlo tras unir, porque un corte puede caer dentro de un carácter.
 - `RAY_DEDUP_LOGS=0` sigue siendo asunto del clúster (D15.9, `compose.yaml`); la
@@ -694,17 +696,20 @@ cliente que se va, y un cliente que abre y cierra conexiones agota los hilos de
 
 | Productor | Consumidor | Contrato | Notas |
 |-----------|------------|----------|-------|
-| Executor (hilo emisor) | LogStore (actor) | \`append_fragment(eid, seq, bytes) -> bool\` | Idempotente por seq |
-| Executor (hilo emisor) | LogStore (actor) | \`close_fragments(eid) -> bool\` | Marca el fin (D15.14) |
-| LogStore (actor) | Gateway | \`read_fragments(eid, offset, limit) -> [(seq, bytes)]\` | Offset en bytes |
-| LogStore (actor) | Gateway | \`log_size(eid) -> int\` | Bytes de salida (D15.15) |
-| LogStore (actor) | Gateway | \`tail_fragments(eid, offset) -> AsyncIterator[(seq, bytes)]\` | Para streaming |
-| Scheduler (núcleo) | Coordinador (actor) | \`job.events() -> List[Event]\` | Datos puros, sin Ray; reloj inyectado (D15.16) |
-| Coordinador (actor) | Gateway | \`events(job_id) -> list[dict] | None\` | \`None\` si el trabajo no existe; \`timestamp\` flotante |
-| Coordinador (actor) | \`_Client\` | \`events(job_id)\`, igual que \`status(job_id)\` | Bloqueantes, con \`CALL_TIMEOUT_S\` |
-| Coordinador (actor) | Journal (SQLite) | \`append(job, kind, *args) -> at\` / \`events() -> (job, kind, args, at)\` | La hora de cada llamada (D15.16) |
-| Gateway | Cliente CLI | HTTP \`GET /logs?offset=&limit=\` / \`?follow=1\` | text/plain, chunked |
-| Gateway | Cliente CLI | HTTP \`GET /jobs/{id}/events\` | application/json; hora ISO 8601 UTC (D15.5) |
+| Executor (hilo emisor) | LogStore (actor) | `append_fragment(eid, seq, bytes) -> bool` | Idempotente por seq; lanza `LogTruncated` si el intento está lleno (D15.13) |
+| Executor (hilo emisor) | LogStore (actor) | `close_fragments(eid) -> bool` | Marca el fin (D15.14) |
+| LogStore (actor) | Coordinador (actor) | `drop(execution_ids) -> int` | Borra intentos superados; devuelve los bytes liberados (D15.13) |
+| Ejecutor | `sandbox.run` | `capture_limit=None -> Outcome.overflow` | Mata el comando que pasa del tope (D15.13) |
+| Ejecutor | Coordinador (actor) | `TaskResult.log_truncated: bool = False` | Campo aditivo; viaja en el resultado (D15.13) |
+| LogStore (actor) | Gateway | `read_fragments(eid, offset, limit) -> [(seq, bytes)]` | Offset en bytes |
+| LogStore (actor) | Gateway | `log_size(eid) -> int` | Bytes de salida (D15.15) |
+| LogStore (actor) | Gateway | `tail_fragments(eid, offset) -> AsyncIterator[(seq, bytes)]` | Para streaming |
+| Scheduler (núcleo) | Coordinador (actor) | `job.events() -> List[Event]` | Datos puros, sin Ray; reloj inyectado (D15.16) |
+| Coordinador (actor) | Gateway | `events(job_id) -> list[dict] | None` | `None` si el trabajo no existe; `timestamp` flotante |
+| Coordinador (actor) | `_Client` | `events(job_id)`, igual que `status(job_id)` | Bloqueantes, con `CALL_TIMEOUT_S` |
+| Coordinador (actor) | Journal (SQLite) | `append(job, kind, *args) -> at` / `events() -> (job, kind, args, at)` | La hora de cada llamada (D15.16) |
+| Gateway | Cliente CLI | HTTP `GET /logs?offset=&limit=` / `?follow=1` | text/plain, chunked |
+| Gateway | Cliente CLI | HTTP `GET /jobs/{id}/events` | application/json; hora ISO 8601 UTC (D15.5) |
 
 ---
 
@@ -712,15 +717,15 @@ cliente que se va, y un cliente que abre y cierra conexiones agota los hilos de
 
 | Test | Qué verifica | Nivel |
 |------|--------------|-------|
-| \`test_following_prints_while_the_task_still_runs\` | \`logs -f\` imprime salida antes de que la tarea termine | E2E |
-| \`test_logs_survive_worker_death\` | \`logs -o 0\` devuelve fragmentos tras \`docker kill worker\` | E2E |
-| \`test_events_shows_history\` | \`GET /events\` devuelve transiciones, clases, esperas | E2E |
-| \`test_the_offset_resumes_at_that_byte\` | \`logs -o N\` retoma exactamente en byte N | E2E |
-| \`test_duplicate_fragment_ignored\` | LogStore ignora seq duplicado | Unit |
-| \`EventsTest\` | Cada transición genera el Event correcto (Commit 5) | Unit |
-| \`EventsApiTest\` | \`GET /jobs/{id}/events\`: orden, claves, hora ISO, 404 (Commit 6) | Unit |
-| \`LogsTest\` (test_cli) | \`logs\`: banderas, offset, \`-n\`, \`-f\` y códigos 0/1/2/3 (Commit 7) | Unit |
-| \`test_gateway_streaming_cleanup\` | Desconexión cliente limpia suscripción tail | Integration |
+| `test_following_prints_while_the_task_still_runs` | `logs -f` imprime salida antes de que la tarea termine | E2E |
+| `test_logs_survive_worker_death` | `logs -o 0` devuelve fragmentos tras `docker kill worker` | E2E |
+| `test_events_shows_history` | `GET /events` devuelve transiciones, clases, esperas | E2E |
+| `test_the_offset_resumes_at_that_byte` | `logs -o N` retoma exactamente en byte N | E2E |
+| `test_duplicate_fragment_ignored` | LogStore ignora seq duplicado | Unit |
+| `EventsTest` | Cada transición genera el Event correcto (Commit 5) | Unit |
+| `EventsApiTest` | `GET /jobs/{id}/events`: orden, claves, hora ISO, 404 (Commit 6) | Unit |
+| `LogsTest` (test_cli) | `logs`: banderas, offset, `-n`, `-f` y códigos 0/1/2/3 (Commit 7) | Unit |
+| `test_gateway_streaming_cleanup` | Desconexión cliente limpia suscripción tail | Integration |
 
 ---
 
@@ -732,8 +737,8 @@ Hecha al cerrar la fase: tabla §2 actualizada:
 |----|---------------|-------|--------|
 | R5 | Registro y transmisión de logs | 1, 4 | ✅ cumplido (C4, 2026-11-20) |
 
-Decisiones D15.1–D15.12 y D15.14–D15.19 registradas como cerradas en este
-documento (D15.13 queda para §7, crecimiento sin cota).
+Decisiones D15.1–D15.18 registradas como cerradas en este documento; D15.13 se
+decidió el 2026-11-21 en §7.6, después del corte C4.
 
 ---
 
@@ -908,7 +913,7 @@ permite cancelar el generador remoto al cerrar el del llamante, de ahí el tope.
 - `py -m unittest discover -s tests/host` → 8 pruebas OK.
 - Comprobación fuera de las pruebas, con la pasarela del nodo de control y un
   trabajo que imprime tres líneas espaciadas: `follow=1` las emitió según se
-  producían y cerró al terminar la tarea; `offset=6&limit=6` devolvió `line2\n`;
+  producían y cerró al terminar la tarea; `offset=6&limit=6` devolvió `line2n`;
   `Range: bytes=12-` → 206 con `Content-Range: bytes 12-17/18`;
   `Range: bytes=18-` → 416 con `bytes */18`; una tarea desconocida → 404;
   `offset=x` → 400; `Range` junto a `offset` → 400.
@@ -1139,7 +1144,7 @@ transporte HTTP y `_Client.events`.
   logstore.py` 100 %, `dpes/scheduler.py` 100 % (0 de 359 sentencias sin
   probar), umbral 90 % en CI.
 - Comprobación manual fuera de las pruebas, contra la pasarela real, con un
-  trabajo `echo one; echo two`: log entero → `one\ntwo\n` y 0; `-o 4` → `two`
+  trabajo `echo one; echo two`: log entero → `onentwon` y 0; `-o 4` → `two`
   y 0; `-n 1` → `two` y 0; tarea inexistente → `HTTP 404: unknown task` y 2;
   `--url http://127.0.0.1:9` → `cannot reach the gateway` y 3; `-o -1` →
   `HTTP 400: offset: a whole number` y 1.
@@ -1191,16 +1196,88 @@ transporte HTTP y `_Client.events`.
 - Ningún marcador «planificado» queda en el diagrama de módulos: `logstore`
   aparece como nodo implementado (clase E/S) y no como `previsto`.
 
----
+### Commit 12 — retención y contrapresión de los logs (2026-11-21)
+
+Cierra el límite conocido de §7 con la decisión D15.13 (§7.6).
+
+**Qué hay:**
+
+- `dpes/logstore.py`: `MAX_ATTEMPT_BYTES` (100 MiB, `DPES_LOG_MAX_MIB`) como
+  tope por intento; `LogDir(root, max_bytes=None)`; un fragmento que no cabe
+  lanza `LogTruncated(execution_id, size, limit)` y no se escribe. La
+  comprobación de duplicado (D15.1) va **antes** que la del tope, así que
+  reintentar el `seq` que ya está no se confunde con una truncación. `drop(ids)`
+  borra los archivos de los intentos que un trabajo terminado ya no sirve y
+  devuelve los bytes liberados; los ids descartados se recuerdan en `_dropped`
+  para que un fragmento tardío no recree el archivo y un seguidor suyo termine
+  en el acto en vez de esperar `IDLE_S`.
+- `dpes/coordinator.py`: `LogStore(root, max_bytes=None)` anuncia su tope al
+  arrancar y convierte el `LogTruncated` en el evento de sistema `log truncated`
+  con `side="control"`, `bytes` y `limit` (D10.5) antes de relanzarlo; gana
+  `drop`. `_sweep(job)`, llamado desde `_log_if_finished` con `_spawn`, conserva
+  el intento al que apunta la vista (`tasks[t]["execution_id"]`, el que resolvió
+  la tarea o el último fallido) y borra los demás de `attempts`. Ni diario ni
+  estado: es espacio, se puede repetir y es de mejor esfuerzo; si el actor no
+  contesta se registra `log sweep failed` y el trabajo no cambia (D15.13).
+- `dpes/sandbox.py`: `run(..., capture_limit=None)` y `Outcome.overflow`. `_wait`
+  sondea cada 0.1 s y, al pasarse del tope, mata el grupo del comando y lo
+  informa como desbordamiento, no como plazo. Truncar el archivo no libera el
+  disco: el hijo escribe con el desplazamiento que comparte con el padre y la
+  siguiente escritura lo vuelve a extender.
+- `dpes/executor.py`: `MAX_CAPTURE_BYTES` (50 MiB, `DPES_LOG_CAPTURE_MIB`). El
+  emisor corta el último fragmento a lo que cabe, deja de enviar al llegar y
+  **cierra el log igual** (para que un `logs -f` termine, D15.4/D15.14); `_send`
+  distingue `LogTruncated` (el intento está lleno, el almacén está vivo) de un
+  fallo del almacén, que sigue tomándose por muerto. El evento `log truncated`
+  lleva `side` (`control` o `worker`). `LogTruncated.__reduce__` la reconstruye
+  con sus tres campos: Ray transporta la excepción pickleándola y el camino por
+  omisión (solo el mensaje) la dejaba en `UnserializableException`, con lo que
+  el emisor tomaba el almacén por muerto.
+- `dpes/messages.py`: `TaskResult.log_truncated: bool = False`, campo aditivo
+  (los constructores existentes no cambian); es el único cambio de contrato de
+  este commit y queda registrado aquí.
+- `dpes/scheduler.py`: `_Task.truncated`, expuesto como `truncated` en la vista
+  de la tarea; el motivo del fallo es «output over the log limit» y el flag se
+  vuelve a `False` cuando un intento posterior acaba sin resultado.
+- `plan/00-contexto-y-restricciones.md` §6: el riesgo de crecimiento sin cota
+  pasa a cerrado.
+
+**Pruebas:**
+
+| Qué | Test que lo evidencia | Nivel |
+|-----|-----------------------|-------|
+| Tope por intento y hueco de `seq` | `test_a_fragment_that_does_not_fit_is_refused`, `test_a_fragment_that_fills_the_ceiling_exactly_is_stored`, `test_a_refused_fragment_leaves_a_gap_the_next_one_can_use`, `test_the_ceiling_defaults_to_the_configured_one` | Unit |
+| Un duplicado no es una truncación | `test_a_repeated_seq_is_not_taken_for_a_truncation` | Unit |
+| La excepción cruza el actor | `test_truncation_survives_the_trip_through_ray`, `test_the_actor_raises_truncation_as_its_own_type` | Unit, Integration |
+| Barrido y seguidor tardío | `test_a_dropped_attempt_is_forgotten_and_its_file_gone`, `test_dropping_twice_frees_nothing_the_second_time`, `test_dropping_an_attempt_that_never_wrote_frees_nothing`, `test_a_late_fragment_does_not_recreate_a_dropped_log`, `test_only_the_attempts_given_are_dropped`, `test_tail_of_a_dropped_attempt_ends_at_once` | Unit |
+| El coordinador barre al cerrar | `LogRetentionTest` (`test_the_attempt_that_settled_the_task_keeps_its_log`, `test_a_superseded_attempt_loses_its_log_when_the_job_closes`) | Integration |
+| Tope de captura del trabajador | `test_the_worker_ceiling_cuts_the_last_fragment_to_what_fits`, `test_a_flooding_command_is_killed_and_the_log_says_it_was_cut`, `test_a_command_that_floods_its_output_is_killed_at_the_limit`, `test_a_command_under_the_limit_runs_to_its_end` | Unit |
+| Vista, motivo y trabajos normales | `test_a_cut_log_is_shown_in_the_view_but_does_not_fail_the_task`, `test_a_command_killed_for_its_log_fails_with_that_reason`, `test_a_task_that_ran_normally_is_not_marked_truncated` | Unit |
+| Un trabajo que imprime sin pausa | `test_a_runaway_command_stops_at_the_log_limit` | E2E |
+
+**Verificación (2026-11-21, clúster de tres nodos):**
+
+- `py -W error -m unittest discover -s tests/unit` → 288 pruebas OK (2 saltadas
+  por ser de Linux).
+- En el nodo de control, las mismas con cobertura → 341 pruebas OK; cobertura de
+  `dpes/executor.py` 95 %, `dpes/logstore.py` 99 %, `dpes/sandbox.py` 97 %,
+  `dpes/scheduler.py` 100 %.
+- `tests/integration` → 40 pruebas OK; `tests/e2e` → 34 pruebas OK (la del
+  comando desbocado termina en segundos: el tope del trabajador mata el comando
+  antes de que el nodo de control tenga que cortar nada).
+- `py -m unittest discover -s tests/host` → 9 pruebas OK.
 
 ---
 
-## 7. Crecimiento sin cota del almacén de logs (límite conocido, decisión pendiente)
+---
 
-**Estado:** aceptado como límite conocido el 2026-11-18 y **sin decidir**. No es
-un descuido de implementación: es una política que no existe, y elegirla por
-omisión es justo lo que prohíbe la regla 7 del proyecto. El número **D15.13**
-queda reservado para la decisión.
+## 7. Crecimiento sin cota del almacén de logs (límite conocido; decidido en D15.13)
+
+**Estado:** aceptado como límite conocido el 2026-11-18, **decidido** el
+2026-11-21 en D15.13 (§7.6) e **implementado** ese mismo día en el Commit 12 de
+§6. No fue un descuido de implementación: era una política que no existía, y
+elegirla por omisión es justo lo que prohíbe la regla 7 del proyecto. Lo que
+sigue describe la situación tal como estaba al abrir el análisis.
 
 ### 7.1 Lo que hoy no existe
 
@@ -1282,6 +1359,102 @@ pruebas. La implementación mínima previsible:
 - prueba de que un trabajo normal no cambia de comportamiento ni de rendimiento.
 
 **No forma parte del corte C4.** C4 se cierra con lo que hay: D15.2 y D15.12
-defienden la durabilidad, no la retención. Mientras no se decida, este apartado
-y el riesgo correspondiente de [00-contexto-y-restricciones.md](00-contexto-y-restricciones.md)
-§6 son el registro de la deuda; no se implementa nada por omisión.
+defienden la durabilidad, no la retención. El apartado y el riesgo
+correspondiente de [00-contexto-y-restricciones.md](00-contexto-y-restricciones.md)
+§6 fueron el registro de la deuda hasta D15.13.
+
+### 7.6 Decisión D15.13 — dos topes por intento y barrido al cerrar el trabajo
+
+**Contexto.** El de §7.1 y §7.2: dos discos expuestos (el volumen del nodo de
+control, que comparte con blobs, resultados y diario; y el temporal del
+trabajador), ninguna política de retención, y un emisor que hoy no tiene
+contrapresión en ninguno de los dos lados. El corte C4 cerró con esa deuda
+declarada; este paso la salda.
+
+**Opciones consideradas.** Las cinco de §7.3, con su coste y su rotura. La 3
+(rotación) se descarta porque mueve los offsets que C4 garantiza (`logs -o N`
+lee bytes exactos del intento) y obligaría a un índice por segmento. La 4
+(cuota del volumen) no evita el fallo: lo convierte en `ENOSPC` y deja al
+sistema sin logs, que es lo que D15.2 ya trata como `OSError`. La 1, la 2 y la 5
+no son excluyentes, y entre las tres cubren los dos discos y las dos escalas de
+tiempo sin tocar el formato de D15.2.
+
+**Decisión.**
+
+1. **Tope por intento en el nodo de control** (`LogDir.append`): un intento
+   guarda como mucho `MAX_ATTEMPT_BYTES` (100 MiB por omisión,
+   `DPES_LOG_MAX_MIB`). Un fragmento que no cabe no se escribe y `append` lanza
+   `LogTruncated`, con `execution_id`, `size` y `limit`; el actor lo registra
+   como evento de sistema `log truncated` con `execution=` (D10.5) antes de
+   relanzarlo. La comprobación de duplicado (D15.1) va antes que la del tope:
+   reintentar un `seq` que ya está no puede confundirse con una truncación.
+2. **Tope de la captura en el trabajador** (`MAX_CAPTURE_BYTES`, 50 MiB por
+   omisión, `DPES_LOG_CAPTURE_MIB`), en dos mitades que se complementan: el
+   emisor deja de enviar al llegar al tope, y `sandbox.run` **mata el comando**
+   cuando el archivo de captura lo pasa. Truncar el archivo no sirve: el hijo
+   escribe con el mismo desplazamiento que el padre comparte, así que tras
+   `truncate` la siguiente escritura vuelve a extender el archivo hasta ese
+   desplazamiento y el disco no se libera. La única forma de acotar el disco del
+   trabajador mientras el comando corre es terminarlo.
+3. **Retención por trabajo** (`LogStore.drop`, llamado por el coordinador al
+   cerrar): de cada tarea se conserva el intento al que apunta la vista (el que
+   la resolvió, o el último fallido, que es el que interesa depurar) y se
+   borran los demás —los reintentos superados y los intentos de rondas viejas—.
+   Un intento descartado queda marcado: un fragmento tardío no lo recrea
+   (`append` devuelve `False`), y un seguidor suyo termina en el acto en vez de
+   esperar `IDLE_S`, en lugar de encontrarse un archivo que ya no está.
+4. **Visibilidad.** `TaskResult.log_truncated` (campo nuevo con valor por
+   omisión, aditivo: los constructores actuales no cambian) viaja del ejecutor
+   al estado, y la vista de la tarea expone `truncated`. El motivo del fallo lo
+   dice: «output over the log limit». El evento de sistema lleva
+   `execution=`, `side` (`control` o `worker`), `bytes` y `limit`.
+
+**Porqué.**
+
+- El tope del nodo de control es el que protege lo que de verdad duele: el
+  volumen que comparte con la caché de artefactos, el punto de confirmación y el
+  diario del coordinador. Falla rápido y en el sitio donde el daño es en cadena.
+- El tope del trabajador evita el segundo camino. Sin matar el comando, un
+  `while True: print()` llena el disco del trabajador en segundos y ningún tope
+  del nodo de control lo impide, porque el archivo crece antes de que el emisor
+  lo lea.
+- El barrido no puede ser inmediato como los topes: el trabajo puede seguir
+  sirviendo sus logs mientras el cliente los lee, así que solo barre al cerrar,
+  y solo lo que la vista ya no puede pedir.
+- Los topes son por intento y no por trabajo: un trabajo grande con muchas
+  tareas no se ve penalizado por una tarea habladora, y el reintento de un
+  intento truncado vuelve a tener su propio presupuesto acotado.
+
+**Consecuencias.**
+
+- Un comando que pasa del tope del trabajador muere por señal (`exit_code`
+  negativo) y la tarea falla con «output over the log limit»; el reintento, si
+  lo hay, repite el trabajo acotado. Es una decisión de política, no un fallo
+  del sistema: por eso la tarea falla y no el trabajador.
+- Los offsets de C4 no cambian: lo truncado nunca se guardó, así que el tamaño
+  del intento sigue siendo el de los bytes aceptados, y lo que se sirve es lo
+  que hay. Un `tail` en curso acaba porque el intento se cierra igual (D15.14).
+- Los valores por omisión (100 y 50 MiB) dejan intacto cualquier trabajo normal:
+  un intento que no llega al tope produce los mismos fragmentos, los mismos
+  offsets y los mismos eventos que antes; solo aparece `truncated: false`.
+- El barrido no se anota en el diario: es espacio, no estado. Es idempotente y
+  de mejor esfuerzo; si el actor no contesta, se registra `log sweep failed` y
+  el trabajo no cambia. Un trabajo recuperado tras un reinicio del coordinador
+  (`_log_if_finished` sale antes para esos, D14.4) no se barre: sus logs se
+  quedan, y ese resto lo absorbe la política de retención del trabajo siguiente
+  que comparta intento, o el tope por intento. Queda declarado aquí.
+- El `LogDir` guarda el conjunto de ids descartados (una cadena por intento
+  barrido) para no recrear archivos borrados; es memoria pequeña y crece con
+  los reintentos, no con los bytes.
+- Cerrado el riesgo de [00-contexto-y-restricciones.md](00-contexto-y-restricciones.md)
+  §6 en lo que respecta a crecimiento sin tope; lo que queda es la elección de
+  los números, que es configuración.
+
+**Pruebas.** Unitarias del tope, del hueco de `seq` y del barrido
+(`tests/unit/test_logstore.py`), del emisor y del comando terminado por el tope
+(`tests/unit/test_executor.py`), del `sandbox` matando por captura
+(`tests/unit/test_sandbox.py`), de la vista con `truncated`
+(`tests/unit/test_scheduler.py`); de integración, la truncación atravesando el
+actor de Ray (`tests/integration/test_logstore.py`); de extremo a extremo, un
+trabajo que imprime sin pausa y acaba acotado y con `truncated: true`
+(`tests/e2e/test_logs.py`).

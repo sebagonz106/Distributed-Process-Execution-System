@@ -21,7 +21,7 @@ from dpes.cas import BlobDir
 from dpes.failures import DEADLINE, RESTARTED, classify
 from dpes.hashing import digest
 from dpes.log import event, setup
-from dpes.logstore import IDLE_S, POLL_S, LogDir, tail
+from dpes.logstore import IDLE_S, POLL_S, LogDir, LogTruncated, tail
 from dpes.messages import ExecutorFailure, TaskResult
 from dpes.scheduler import Job, Launch, State
 from dpes.spec import SpecError, demand, unschedulable
@@ -44,6 +44,7 @@ _FINISHED = {State.SUCCEEDED, State.FAILED, State.ERROR}
 _METHODS = {"running": "running", "result": "on_result",
             "failure": "on_failure", "finished": "finished"}
 _log = logging.getLogger(__name__)
+_log_store = logging.getLogger("dpes.logstore")
 
 
 class _Clock:
@@ -105,15 +106,23 @@ class LogStore:
     fragments, on disk under the data volume (plan/15, D15.2). A worker's
     death cannot take away what already arrived here (F5.4)."""
 
-    def __init__(self, root):
+    def __init__(self, root, max_bytes=None):
         setup()
-        self._logs = LogDir(root)
-        event(logging.getLogger("dpes.logstore"), logging.INFO,
-              "log store started", root=root)
+        self._logs = LogDir(root, max_bytes)
+        event(_log_store, logging.INFO,
+              "log store started", root=root,
+              max_mib=self._logs.limit >> 20)
 
     def append_fragment(self, execution_id, seq, data):
-        """Store `data` as fragment `seq`; False if that seq already is."""
-        return self._logs.append(execution_id, seq, data)
+        """Store `data` as fragment `seq`; False if that seq already is.
+        Raises `LogTruncated` when the attempt is full, with its own event."""
+        try:
+            return self._logs.append(execution_id, seq, data)
+        except LogTruncated as full:
+            event(_log_store, logging.WARNING, "log truncated",
+                  execution=execution_id, side="control", bytes=full.size,
+                  limit=full.limit, seq=seq)
+            raise
 
     def read_fragments(self, execution_id, offset, limit=None):
         """(seq, data) pieces covering bytes [offset, offset+limit)."""
@@ -126,6 +135,11 @@ class LogStore:
     def log_size(self, execution_id):
         """Bytes of output stored for the attempt (D15.15)."""
         return self._logs.size(execution_id)
+
+    def drop(self, execution_ids):
+        """Delete the logs of attempts a finished job no longer serves;
+        returns the bytes freed (D15.13)."""
+        return self._logs.drop(execution_ids)
 
     async def tail_fragments(self, execution_id, offset, poll_s=POLL_S,
                              idle_s=IDLE_S):
@@ -437,6 +451,31 @@ class Coordinator:
         level = logging.INFO if state is State.SUCCEEDED else logging.ERROR
         event(_log, level, "job finished", job=job.job_id, state=state.value,
               **took, **counts)
+        self._spawn(self._sweep(job))
+
+    async def _sweep(self, job):
+        """Free the logs of the attempts this finished job no longer serves
+        (plan/15, D15.13). No journal: it is space, not state, and it is
+        idempotent; a store that cannot take it leaks, it never fails a job."""
+        tasks = job.view()["tasks"]
+        keep = {task["execution_id"] for task in tasks.values()
+                if task["execution_id"]}
+        every = {attempt["execution_id"] for task in tasks.values()
+                 for attempt in task["attempts"]}
+        dropped = sorted(every - keep)
+        if not dropped:
+            return
+        reply = self._logs.drop.remote(dropped)
+        try:
+            freed = await asyncio.wait_for(
+                asyncio.wrap_future(reply.future()), CALL_TIMEOUT_S
+            )
+        except Exception as error:  # the store or the way to it failed
+            event(_log, logging.WARNING, "log sweep failed", job=job.job_id,
+                  attempts=len(dropped), error=type(error).__name__)
+            return
+        event(_log, logging.INFO, "logs swept", job=job.job_id,
+              attempts=len(dropped), freed_bytes=freed)
 
 
 class _Silent(Exception):

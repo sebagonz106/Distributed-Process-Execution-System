@@ -51,7 +51,13 @@ def stand_in_executor(attempt, store):
                            output_tail="saved\n")
         store.save_result(attempt.result_key, saved)
         os._exit(1)
+    if program == "logged-fail":
+        # Writes a log and fails, so its task is retried (plan/15, D15.13).
+        store.append_fragment(attempt.execution_id, 1, b"out\n")
+        return TaskResult(attempt.execution_id, 1, False, {})
     exit_code = int(program) if program.isdigit() else 0
+    if program == "logged":
+        store.append_fragment(attempt.execution_id, 1, b"out\n")
     return TaskResult(attempt.execution_id, exit_code, False, {})
 
 
@@ -429,6 +435,40 @@ class ReplayedJournalTest(CoordinatorTestCase):
         self.assertEqual(["TASK_LAUNCHED", "ATTEMPT_SUCCEEDED",
                           "JOB_FINISHED"],
                          [e["type"] for e in feed])
+
+
+class LogRetentionTest(CoordinatorTestCase):
+    """plan/15, D15.13: a job that closes keeps the log of the attempt its view
+    serves and frees the ones it superseded."""
+
+    def size(self, execution_id):
+        return ray.get(self.logs.log_size.remote(execution_id))
+
+    def wait_size(self, execution_id, expected, timeout_s=10):
+        """The size once the sweep has run: the coordinator frees it in the
+        background, after recording the end of the job."""
+        deadline = time.monotonic() + timeout_s
+        while True:
+            size = self.size(execution_id)
+            if size == expected or time.monotonic() > deadline:
+                return size
+            time.sleep(0.05)
+
+    def test_the_attempt_that_settled_the_task_keeps_its_log(self):
+        view = self.run_one("logged")
+
+        self.assertEqual(4, self.size(view["tasks"]["t"]["execution_id"]))
+
+    def test_a_superseded_attempt_loses_its_log_when_the_job_closes(self):
+        view = self.run_one("logged-fail", retries={"task": 1})
+
+        attempts = [a["execution_id"] for a in view["tasks"]["t"]["attempts"]]
+        self.assertEqual(2, len(attempts))
+        first, last = attempts
+        self.assertEqual(last, view["tasks"]["t"]["execution_id"])
+
+        self.assertEqual(0, self.wait_size(first, 0))
+        self.assertEqual(4, self.size(last))  # the one `logs` still serves
 
 
 if __name__ == "__main__":

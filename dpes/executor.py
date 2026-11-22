@@ -15,6 +15,7 @@ import time
 from dpes import sandbox
 from dpes.hashing import digest
 from dpes.log import event
+from dpes.logstore import LogTruncated
 from dpes.messages import Attempt, Evidence, ExecutorFailure, TaskResult
 
 _HANG_S = 3600  # longer than any deadline: the coordinator cancels first
@@ -26,6 +27,9 @@ FRAGMENT_LINES = 100  # ... or the lines it holds, whichever comes first
 FLUSH_S = 0.5  # ... or how long it waits with nothing more to add
 FOLLOW_S = 0.05  # how often the emitter looks for new output
 JOIN_S = 3.0  # how long the attempt waits for its log to end (RUN_MARGIN_S)
+# Output one attempt may capture and ship: past it the command is killed, since
+# truncating the file it writes to would not free the disk (D15.13).
+MAX_CAPTURE_BYTES = int(os.environ.get("DPES_LOG_CAPTURE_MIB", "50")) << 20
 _log = logging.getLogger(__name__)
 
 
@@ -72,7 +76,7 @@ def execute(attempt: Attempt, store):
         try:
             outcome = sandbox.run(
                 attempt.command, attempt.env, attempt.timeout_s, workspace,
-                sink=emission.sink,
+                sink=emission.sink, capture_limit=MAX_CAPTURE_BYTES,
             )
         finally:
             emission.stop()  # however the command ended, its log ends here
@@ -94,6 +98,7 @@ def execute(attempt: Attempt, store):
         outputs=outputs,
         missing_outputs=tuple(missing),
         output_tail=outcome.output,
+        log_truncated=emission.truncated or outcome.overflow,
     ))
 
 
@@ -181,7 +186,8 @@ class _Emitter:
     survives the worker (F5.4). Best effort by design: a fragment the store
     never takes is counted, never raised, because a log cannot fail a task.
     Fragments are bytes: a reader joins them before decoding, as a cut can
-    fall inside a character.
+    fall inside a character. The log stops once it reaches its ceiling
+    (D15.13), and is ended as usual, so a follower sees it finish.
     """
 
     def __init__(self, store, execution_id):
@@ -194,13 +200,20 @@ class _Emitter:
         self._pending = b""  # read and not sent yet
         self._seq = self._sent = self._lost = 0
         self._bytes = 0  # of output that reached the store
+        self._limit = MAX_CAPTURE_BYTES  # of output shipped for this attempt
         self._last_send = time.monotonic()
         self._down = False  # the store is refusing: stop trying
+        self._capped = False  # the log reached its ceiling (D15.13)
         self._fault = None
 
     def start(self):
         self._thread.start()
         return self
+
+    @property
+    def truncated(self):
+        """Whether the log stopped at its ceiling (D15.13)."""
+        return self._capped
 
     def stop(self):
         """No more output: send the rest, end the log, close both files.
@@ -228,7 +241,9 @@ class _Emitter:
     def _follow(self):
         """Read what the command writes, in fragments, until it is over."""
         while True:
-            if self._down:  # nowhere to send it: let the file grow in peace
+            if self._down or self._capped:
+                # Nowhere to send it, or nowhere left: the file may grow in
+                # peace until the command is over (the sandbox kills a flood).
                 if self._stop.wait(FLUSH_S):
                     return
                 continue
@@ -245,7 +260,7 @@ class _Emitter:
                 time.sleep(FOLLOW_S)
 
     def _send_ready(self, final):
-        while self._pending and not self._down:
+        while self._pending and not self._down and not self._capped:
             cut = self._cut(final)
             if cut is None:
                 return
@@ -276,6 +291,19 @@ class _Emitter:
         return at + 1
 
     def _ship(self, piece):
+        """Send one fragment, keeping the attempt under its capture ceiling.
+
+        The last fragment is cut down to what still fits, so the log holds
+        exactly the ceiling and not a byte more (D15.13)."""
+        room = self._limit - self._bytes
+        if len(piece) > room:
+            if room:
+                self._send(piece[:room])
+            self._truncate("worker", self._limit)
+            return
+        self._send(piece)
+
+    def _send(self, piece):
         """Send one fragment under its own seq and retry it as it is: the store
         drops a repeat, so a lost reply costs nothing. Once the retries are
         spent the store is taken for dead and the rest of the log is lost."""
@@ -291,10 +319,24 @@ class _Emitter:
                 self._sent += 1
                 self._bytes += len(piece)
                 return
+            except LogTruncated as full:  # the attempt in the store is full
+                self._truncate("control", full.limit)
+                return
             except Exception:  # the store or the way to it failed
                 continue
         self._lost += 1
         self._down = True  # retrying every fragment of a dead store is waste
+
+    def _truncate(self, side, limit):
+        """Stop the log here and say so once: the rest of the output is lost
+        on purpose, so it cannot pass for the end of what the command wrote."""
+        if self._capped:
+            return
+        self._capped = True
+        self._pending = b""  # it would never be sent
+        event(_log, logging.WARNING, "log truncated",
+              execution=self._execution_id, side=side, bytes=self._bytes,
+              limit=limit)
 
     def _finish(self):
         self._send_ready(final=True)

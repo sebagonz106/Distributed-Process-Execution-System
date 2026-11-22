@@ -11,6 +11,7 @@ if sys.platform != "linux":
 from dpes import executor  # imported after the skip: it needs Linux
 from dpes.hashing import digest
 from dpes.log import Formatter
+from dpes.logstore import LogTruncated
 from dpes.messages import Attempt, Evidence, ExecutorFailure, TaskResult
 
 
@@ -431,6 +432,78 @@ class LogEmissionTest(unittest.TestCase):
         fields = [r.fields for r in caught.records
                   if r.getMessage() == "log fragments lost"][0]
         self.assertEqual((1, 1), (fields["sent"], fields["lost"]))
+
+
+class Capped(Blobs):
+    """A store with a ceiling, as the control node's has (D15.13)."""
+
+    def __init__(self, limit):
+        super().__init__()
+        self.limit = limit
+        self.taken = 0
+
+    def append_fragment(self, execution_id, seq, data):
+        if self.taken + len(data) > self.limit:
+            raise LogTruncated(execution_id, self.taken, self.limit)
+        self.taken += len(data)
+        return super().append_fragment(execution_id, seq, data)
+
+
+class LogCeilingTest(unittest.TestCase):
+    """What stops the log at its ceiling (plan/15, D15.13)."""
+
+    def test_the_store_ceiling_ends_the_log_without_failing_the_task(self):
+        store = Capped(300)
+
+        with self.assertLogs("dpes.executor", "WARNING") as caught:
+            task = execute(attempt("i=0; while [ $i -lt 200 ]; do echo $i; "
+                                   "i=$((i+1)); done"), store)
+
+        self.assertTrue(task.log_truncated)
+        self.assertEqual(0, task.exit_code)  # the command itself ended well
+        stored = b"".join(d for _, d in store.fragments)
+        self.assertEqual(290, len(stored))  # the fragment that still fitted
+        self.assertTrue(stored.endswith(b"99\n"))
+        # The log is ended as usual, so a follower stops instead of waiting.
+        self.assertEqual([task.execution_id], store.closed)
+        (truncated,) = [r.fields for r in caught.records
+                        if r.getMessage() == "log truncated"]
+        self.assertEqual(("control", 290, 300),
+                         (truncated["side"], truncated["bytes"],
+                          truncated["limit"]))
+
+    @mock.patch("dpes.executor.MAX_CAPTURE_BYTES", 10)
+    def test_the_worker_ceiling_cuts_the_last_fragment_to_what_fits(self):
+        store = Blobs()
+
+        with self.assertLogs("dpes.executor", "WARNING") as caught:
+            task = execute(
+                attempt("printf 'abcdefghij\\nklmnopqrst\\n'"), store
+            )
+
+        self.assertTrue(task.log_truncated)
+        self.assertEqual(b"abcdefghij", b"".join(d for _, d in store.fragments))
+        self.assertEqual([task.execution_id], store.closed)
+        (truncated,) = [r.fields for r in caught.records
+                        if r.getMessage() == "log truncated"]
+        self.assertEqual(("worker", 10), (truncated["side"],
+                                          truncated["limit"]))
+
+    @mock.patch("dpes.executor.MAX_CAPTURE_BYTES", 1000)
+    def test_a_flooding_command_is_killed_and_the_log_says_it_was_cut(self):
+        store = Blobs()
+
+        with self.assertLogs("dpes.executor", "WARNING") as caught:
+            task = execute(attempt("while :; do echo spam; done"), store)
+
+        self.assertTrue(task.log_truncated)
+        self.assertLess(task.exit_code, 0)  # killed by a signal
+        self.assertEqual([task.execution_id], store.closed)
+        self.assertLessEqual(
+            len(b"".join(d for _, d in store.fragments)), 1000
+        )
+        self.assertEqual(1, len([r for r in caught.records
+                                 if r.getMessage() == "log truncated"]))
 
 
 class Stopped(Exception):

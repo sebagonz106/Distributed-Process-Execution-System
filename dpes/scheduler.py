@@ -70,6 +70,7 @@ class _Task:
         self.result = None
         self.error = None
         self.failure_class = None
+        self.truncated = False  # the settling attempt's log hit its ceiling
         self.retries_used = {key: 0 for key in spec.retries}
         self.history = []
 
@@ -149,6 +150,7 @@ class Job:
             note = f"confirmed result of {result.execution_id}"
         task = self._tasks[name]
         task.result = result
+        task.truncated = result.log_truncated
         if not result.succeeded:
             reason = _reason(result) + (f"; {note}" if note else "")
             return self._failed(name, FailureClass.TASK, reason)
@@ -168,6 +170,7 @@ class Job:
         if name is None:
             return []
         self._tasks[name].result = None
+        self._tasks[name].truncated = False  # that attempt left no log to trust
         return self._failed(name, failure_class, reason)
 
     @property
@@ -202,6 +205,7 @@ class Job:
                         else None
                     ),
                     "error": task.error,
+                    "truncated": task.truncated,
                     "attempts": list(task.history),
                 }
                 for name, task in self._tasks.items()
@@ -339,4 +343,6 @@ def _reason(result: TaskResult) -> str:
         return "timed out"
     if result.missing_outputs:
         return f"declared outputs missing: {', '.join(result.missing_outputs)}"
+    if result.log_truncated:
+        return "output over the log limit"  # it was killed for it (D15.13)
     return f"exit code {result.exit_code}"

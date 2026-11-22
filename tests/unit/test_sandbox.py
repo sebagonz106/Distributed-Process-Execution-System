@@ -112,6 +112,26 @@ class SandboxTest(WorkspaceTestCase):
             self.assertFalse(sink.closed)  # left open: the caller owns it
             self.assertEqual("hi\n", outcome.output)
 
+    def test_a_command_that_floods_its_output_is_killed_at_the_limit(self):
+        # Truncating the file would not free the disk: the next write puts it
+        # back at the same offset, so the command itself must stop (D15.13).
+        started = time.monotonic()
+
+        outcome = sandbox.run(("sh", "-c", "while :; do echo spam; done"), {},
+                              30, self.workspace, capture_limit=1000)
+
+        self.assertTrue(outcome.overflow)
+        self.assertFalse(outcome.timed_out)  # the cap, not the deadline
+        self.assertLess(outcome.exit_code, 0)  # killed by a signal
+        self.assertLess(time.monotonic() - started, 10)
+
+    def test_a_command_under_the_limit_runs_to_its_end(self):
+        outcome = sandbox.run(("sh", "-c", "echo hi"), {}, 5,
+                              self.workspace, capture_limit=1000)
+
+        self.assertFalse(outcome.overflow)
+        self.assertEqual((0, "hi\n"), (outcome.exit_code, outcome.output))
+
 
 @unittest.skipUnless(os.geteuid() == 0, "dropping privileges needs root")
 class UnprivilegedTest(WorkspaceTestCase):

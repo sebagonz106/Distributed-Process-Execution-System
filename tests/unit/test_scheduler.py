@@ -22,10 +22,11 @@ def make_job(*names, retries=None, rand=0.5, clock=None):
 
 
 def result(execution_id, exit_code=0, timed_out=False, output_tail="",
-           missing_outputs=()):
+           missing_outputs=(), log_truncated=False):
     return TaskResult(execution_id, exit_code, timed_out, {},
                       missing_outputs=missing_outputs,
-                      output_tail=output_tail)
+                      output_tail=output_tail,
+                      log_truncated=log_truncated)
 
 
 def only(launches):
@@ -104,6 +105,26 @@ class OutcomeTest(unittest.TestCase):
         self.assertEqual(State.ERROR, self.job.state)
         self.assertEqual("WorkerCrashedError", self.task_view()["error"])
         self.assertEqual("WORKER", self.task_view()["failure_class"])
+
+    def test_a_cut_log_is_shown_in_the_view_but_does_not_fail_the_task(self):
+        # The control node's ceiling only stops what is stored: the command
+        # itself ended well (D15.13).
+        self.job.on_result(result(self.eid, log_truncated=True))
+
+        self.assertEqual(State.SUCCEEDED, self.job.state)
+        self.assertTrue(self.task_view()["truncated"])
+
+    def test_a_command_killed_for_its_log_fails_with_that_reason(self):
+        self.job.on_result(result(self.eid, exit_code=-9, log_truncated=True))
+
+        self.assertEqual(State.FAILED, self.job.state)
+        self.assertTrue(self.task_view()["truncated"])
+        self.assertEqual("output over the log limit", self.task_view()["error"])
+
+    def test_a_task_that_ran_normally_is_not_marked_truncated(self):
+        self.job.on_result(result(self.eid))
+
+        self.assertFalse(self.task_view()["truncated"])
 
     def test_an_event_for_an_unknown_attempt_changes_nothing(self):
         self.assertEqual([], self.job.on_result(result("job-1/hello/0/99")))

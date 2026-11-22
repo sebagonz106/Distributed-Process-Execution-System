@@ -3,13 +3,15 @@
 import hashlib
 import io
 import os
+import pickle
 import struct
 import tempfile
 import time
 import unittest
 from unittest import mock
 
-from dpes.logstore import LogDir, tail, _MAX_DATA, _MAX_ID
+from dpes import logstore
+from dpes.logstore import LogDir, LogTruncated, tail, _MAX_DATA, _MAX_ID
 
 EID = "job-1/compile/0/1"
 OTHER = "job-1/link/0/1"
@@ -311,6 +313,128 @@ class LogDirTest(unittest.TestCase):
         return _Short(real) if "a" in mode or "w" in mode else real
 
 
+class CeilingTest(unittest.TestCase):
+    """The per-attempt ceiling of plan/15, D15.13: what does not fit is not
+    stored, and a refused fragment is not the same as a repeated one."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = directory.name
+
+    def capped(self, limit):
+        return LogDir(self.root, max_bytes=limit)
+
+    def test_a_fragment_that_does_not_fit_is_refused(self):
+        logs = self.capped(8)
+        self.assertTrue(logs.append(EID, 1, b"hola\n"))  # 5 of 8
+
+        with self.assertRaises(LogTruncated) as caught:
+            logs.append(EID, 2, b"mundo\n")  # 6 more do not fit
+
+        self.assertEqual((EID, 5, 8), (caught.exception.execution_id,
+                                       caught.exception.size,
+                                       caught.exception.limit))
+        self.assertEqual(5, logs.size(EID))
+        self.assertEqual([(1, b"hola\n")], logs.read(EID, 0))
+
+    def test_a_fragment_that_fills_the_ceiling_exactly_is_stored(self):
+        logs = self.capped(5)
+
+        self.assertTrue(logs.append(EID, 1, b"hola\n"))
+        self.assertTrue(logs.close(EID))
+
+    def test_a_repeated_seq_is_not_taken_for_a_truncation(self):
+        # The duplicate check comes first (D15.1): retrying the last fragment
+        # of a full attempt must not look like one fragment too many.
+        logs = self.capped(5)
+        logs.append(EID, 1, b"hola\n")
+
+        self.assertFalse(logs.append(EID, 1, b"hola\n"))
+
+    def test_a_refused_fragment_leaves_a_gap_the_next_one_can_use(self):
+        logs = self.capped(10)
+        logs.append(EID, 1, b"one\n")  # 4 of 10
+        with self.assertRaises(LogTruncated):
+            logs.append(EID, 2, b"x" * 20)  # never stored
+
+        self.assertTrue(logs.append(EID, 3, b"three\n"))  # 4 + 6: it fits
+        self.assertFalse(logs.append(EID, 2, b"x" * 20))  # a straggler
+
+        self.assertEqual([(1, b"one\n"), (3, b"three\n")], logs.read(EID, 0))
+        self.assertEqual(10, logs.size(EID))
+
+    def test_the_ceiling_defaults_to_the_configured_one(self):
+        with mock.patch.object(logstore, "MAX_ATTEMPT_BYTES", 4):
+            logs = LogDir(self.root)
+
+            with self.assertRaises(LogTruncated):
+                logs.append(EID, 1, b"hola\n")
+
+    def test_truncation_survives_the_trip_through_ray(self):
+        # Ray carries an exception by pickling it, and the executor must still
+        # recognize it on the other side (D15.13).
+        error = LogTruncated(EID, 5, 8)
+
+        again = pickle.loads(pickle.dumps(error))
+
+        self.assertIsInstance(again, LogTruncated)
+        self.assertEqual((EID, 5, 8),
+                         (again.execution_id, again.size, again.limit))
+        self.assertEqual(str(error), str(again))
+
+
+class DropTest(unittest.TestCase):
+    """Retention of plan/15, D15.13: the attempts a finished job no longer
+    serves are forgotten and their bytes freed."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = directory.name
+        self.logs = LogDir(self.root)
+
+    def path(self, execution_id):
+        name = hashlib.sha256(execution_id.encode("utf-8")).hexdigest()
+        return os.path.join(self.root, name + ".log")
+
+    def test_a_dropped_attempt_is_forgotten_and_its_file_gone(self):
+        self.logs.append(EID, 1, b"hola\n")
+
+        self.assertEqual(os.path.getsize(self.path(EID)),
+                         self.logs.drop([EID]))
+
+        self.assertEqual([], self.logs.read(EID, 0))
+        self.assertTrue(self.logs.finished(EID))  # a follower ends at once
+        self.assertEqual(0, self.logs.size(EID))
+        self.assertFalse(os.path.exists(self.path(EID)))
+
+    def test_dropping_twice_frees_nothing_the_second_time(self):
+        self.logs.append(EID, 1, b"hola\n")
+        self.logs.drop([EID])
+
+        self.assertEqual(0, self.logs.drop([EID]))
+
+    def test_dropping_an_attempt_that_never_wrote_frees_nothing(self):
+        self.assertEqual(0, self.logs.drop([EID]))
+
+    def test_a_late_fragment_does_not_recreate_a_dropped_log(self):
+        self.logs.append(EID, 1, b"one\n")
+        self.logs.drop([EID])
+
+        self.assertFalse(self.logs.append(EID, 2, b"two\n"))
+        self.assertFalse(os.path.exists(self.path(EID)))
+
+    def test_only_the_attempts_given_are_dropped(self):
+        self.logs.append(EID, 1, b"mine\n")
+        self.logs.append(OTHER, 1, b"kept\n")
+
+        self.logs.drop([EID])
+
+        self.assertEqual([(1, b"kept\n")], self.logs.read(OTHER, 0))
+        self.assertFalse(self.logs.finished(OTHER))
+
+
 class TailTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -353,6 +477,19 @@ class TailTest(unittest.IsolatedAsyncioTestCase):
         self.logs.append(EID, 1, b"late\n")
 
         self.assertEqual((1, b"late\n"), await anext(stream))
+
+    async def test_tail_of_a_dropped_attempt_ends_at_once(self):
+        # A follower of an attempt the job no longer serves must not hang
+        # until the idle limit: the dropped attempt counts as ended (D15.13).
+        self.logs.append(EID, 1, b"one\n")
+        self.logs.drop([EID])
+        began = time.monotonic()
+
+        pieces = [piece async for piece in tail(self.logs, EID, 0,
+                                                poll_s=0.01, idle_s=60)]
+
+        self.assertEqual([], pieces)
+        self.assertLess(time.monotonic() - began, 5)
 
     async def test_tail_ends_after_an_idle_stretch(self):
         started = time.monotonic()

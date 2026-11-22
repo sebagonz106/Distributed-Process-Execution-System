@@ -8,6 +8,7 @@ Run inside the control node:
 
 import http.client
 import os
+import shutil
 import socket
 import tempfile
 import threading
@@ -20,6 +21,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from dpes.coordinator import BlobStore, LogStore, _Client, _StoreClient
 from dpes.executor import execute
 from dpes.gateway import make_server
+from dpes.logstore import LogTruncated
 from dpes.messages import Attempt
 
 EID = "job-1/compile/0/1"
@@ -174,17 +176,22 @@ class LogStoreTest(StoreFixture):
                 time.sleep(0.1)
 
 
+def attempt(execution_id, script):
+    """An attempt of task `compile` that runs `script` with the shell."""
+    return Attempt(
+        job_id=execution_id.split("/")[0], task="compile", round=0,
+        execution_id=execution_id, command=("sh", "-c", script),
+        env={}, inputs={}, outputs=(), timeout_s=10.0,
+    )
+
+
 class ExecutorEmissionTest(StoreFixture):
     """The executor shipping a real attempt's output, as a worker does
     (plan/15, D15.3 and D15.8): the fragments come out of the actor."""
 
     def run_executor(self, execution_id, script):
-        attempt = Attempt(
-            job_id=execution_id.split("/")[0], task="compile", round=0,
-            execution_id=execution_id, command=("sh", "-c", script),
-            env={}, inputs={}, outputs=(), timeout_s=10.0,
-        )
-        return execute(attempt, _StoreClient(self.blobs, self.logs))
+        return execute(attempt(execution_id, script),
+                       _StoreClient(self.blobs, self.logs))
 
     def test_the_output_of_an_attempt_reaches_the_store(self):
         execution_id = "job-6/compile/0/1"
@@ -206,6 +213,59 @@ class ExecutorEmissionTest(StoreFixture):
         self.assertEqual(b"done\n", b"".join(
             data for _, data in (ray.get(ref) for ref in stream)))
         self.assertLess(time.monotonic() - began, 30)
+
+
+class CeilingTest(StoreFixture):
+    """The per-attempt ceiling of plan/15, D15.13, across Ray's actor boundary:
+    the executor must be told the attempt is full, not that the store died."""
+
+    def capped(self, limit):
+        """A store of its own with a small ceiling, and the folder behind it."""
+        folder = tempfile.mkdtemp(prefix="dpes-logs-capped-")
+        self.addCleanup(shutil.rmtree, folder, ignore_errors=True)
+        logs = LogStore.options(
+            scheduling_strategy=self.on_this_node()
+        ).remote(folder, limit)
+        self.addCleanup(ray.kill, logs)
+        return logs
+
+    def test_the_actor_raises_truncation_as_its_own_type(self):
+        # The executor tells «the log stops here» from «the store is gone» by
+        # catching `LogTruncated`, so Ray must re-raise that very class.
+        logs = self.capped(4)
+        ray.get(logs.append_fragment.remote(EID, 1, b"abcd"))
+
+        with self.assertRaises(LogTruncated):
+            ray.get(logs.append_fragment.remote(EID, 2, b"e"))
+
+        self.assertEqual(4, ray.get(logs.log_size.remote(EID)))
+
+    def test_the_executor_learns_the_attempt_is_full(self):
+        logs = self.capped(300)
+        execution_id = "job-8/compile/0/1"
+
+        result = execute(attempt(execution_id,
+                                 "i=0; while [ $i -lt 200 ]; do echo $i; "
+                                 "i=$((i+1)); done"),
+                         _StoreClient(self.blobs, logs))
+
+        self.assertTrue(result.log_truncated)
+        self.assertEqual(0, result.exit_code)  # the command itself ended well
+        pieces = ray.get(logs.read_fragments.remote(execution_id, 0, None))
+        stored = b"".join(data for _, data in pieces)
+        self.assertEqual(290, len(stored))  # the fragment that still fitted
+        self.assertTrue(stored.endswith(b"99\n"))
+
+    def test_a_job_under_the_ceiling_is_unchanged(self):
+        logs = self.capped(1 << 20)
+        execution_id = "job-9/compile/0/1"
+
+        result = execute(attempt(execution_id, "echo one; echo two"),
+                         _StoreClient(self.blobs, logs))
+
+        self.assertFalse(result.log_truncated)
+        pieces = ray.get(logs.read_fragments.remote(execution_id, 0, None))
+        self.assertEqual(b"one\ntwo\n", b"".join(d for _, d in pieces))
 
 
 class GatewayLogRoutingTest(StoreFixture):

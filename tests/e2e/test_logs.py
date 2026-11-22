@@ -12,7 +12,10 @@ import sys
 import time
 import unittest
 
-from gateway_client import URL, cli, events, submit, wait, wait_for_gateway
+from gateway_client import (URL, cli, events, log_size, submit, wait,
+                            wait_for_gateway)
+
+from dpes.executor import MAX_CAPTURE_BYTES
 
 CLI = [sys.executable, "-m", "dpes.cli"]
 
@@ -95,6 +98,28 @@ class LogsTest(unittest.TestCase):
         code, out, err = cli("logs", view["job_id"], "t")
 
         self.assertEqual((0, "boom\n"), (code, out), err)
+
+    def test_a_runaway_command_stops_at_the_log_limit(self):
+        # plan/15, D15.13: the worker kills it at its capture ceiling, so the
+        # attempt fails there instead of growing the disk without bound.
+        began = time.monotonic()
+
+        view = self.run_job(
+            {"t": {"command": ["sh", "-c", "while :; do echo spam; done"]}},
+            expected_code=1,
+        )
+
+        task = view["tasks"]["t"]
+        self.assertTrue(task["truncated"])
+        self.assertEqual("TASK", task["failure_class"])
+        self.assertIn("output over the log limit", task["error"])
+        self.assertLess(time.monotonic() - began, 120)  # not the deadline
+        size = log_size(view["job_id"], "t")
+        self.assertGreater(size, 0)  # what it wrote before being killed
+        self.assertLessEqual(size, MAX_CAPTURE_BYTES)  # is all, and it is held
+        code, out, err = cli("logs", view["job_id"], "t")
+        self.assertEqual(0, code, err)
+        self.assertEqual("spam\n", out.splitlines(True)[-1])
 
     def test_following_prints_while_the_task_still_runs(self):
         code, job_id, err = submit({"t": {"command": [

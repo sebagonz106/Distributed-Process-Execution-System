@@ -112,16 +112,19 @@ resueltas en [02-arquitectura.md](02-arquitectura.md), aprobado el 2026-11-14.
 - **Solapamiento con Ray (A1).** Es el riesgo principal de evaluación: usar las
   facilidades de Ray sin modelar explícitamente los fallos deja la mitad de la
   orientación sin evidencia propia.
-- **Crecimiento sin cota del almacén de logs (R5).** Nada borra
-  `/var/lib/dpes/logs` ni limita la salida de un intento, y ese volumen es
-  también el de los blobs, `results.sqlite` y `coordinator.sqlite`: una tarea
-  que imprima sin pausa puede dejar sin disco al nodo de control y arrastrar a
-  la caché de artefactos, al punto de confirmación y al diario del coordinador.
-  Se acompaña de un segundo camino por el disco del trabajador, porque el hilo
-  emisor no tiene cola acotada. Aceptado como límite conocido al iniciar la
-  Fase 4; el análisis, las opciones y el objetivo de decidirlo e implementarlo
-  están en [15-fase-4-logs.md](15-fase-4-logs.md) §7 (decisión D15.13,
-  pendiente).
+- **Crecimiento sin cota del almacén de logs (R5) — cerrado (D15.13,
+  2026-11-21).** Nada borraba `/var/lib/dpes/logs` ni limitaba la salida de un
+  intento, y ese volumen es también el de los blobs, `results.sqlite` y
+  `coordinator.sqlite`: una tarea que imprima sin pausa podía dejar sin disco al
+  nodo de control y arrastrar a la caché de artefactos, al punto de confirmación
+  y al diario del coordinador; había además un segundo camino por el disco del
+  trabajador. Ahora hay tres piezas: tope de bytes por intento en el nodo de
+  control (`DPES_LOG_MAX_MIB`, 100 MiB), tope de captura en el trabajador
+  (`DPES_LOG_CAPTURE_MIB`, 50 MiB) que **mata el comando** al pasarse —truncar
+  el archivo no libera el disco, porque el hijo escribe en el mismo
+  desplazamiento— y barrido de los intentos superados al cerrar el trabajo. Lo
+  que queda es elegir los números, que es configuración. Análisis, opciones y
+  decisión en [15-fase-4-logs.md](15-fase-4-logs.md) §7.6.
 
 ## Convención de esta carpeta
 
