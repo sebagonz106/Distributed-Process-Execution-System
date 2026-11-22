@@ -3,6 +3,7 @@ flowchart TD
   gateway["gateway.py<br/>API HTTP<br/>(nodo de control)"]
   coordinator["coordinator.py<br/>actor de Ray y adaptador<br/>(nodo de control)"]
   executor["executor.py<br/>un intento<br/>(trabajador)"]
+  logstore["logstore.py<br/>almacén de fragmentos<br/>en disco (actor)"]
   sandbox["sandbox.py<br/>espacio aislado<br/>(trabajador)"]
   scheduler["scheduler.py<br/>máquina de estados"]
   spec["spec.py<br/>formato, validación<br/>y recursos"]
@@ -25,6 +26,8 @@ flowchart TD
   spec --> dag
   executor --> sandbox
   executor --> messages
+  executor -.->|fragmentos| logstore
+  gateway -.->|lectura| logstore
 
   coordinator -.-> store
   scheduler -.-> failures
@@ -45,5 +48,5 @@ flowchart TD
   classDef previsto fill:#ffffff,stroke:#9ca3af,color:#6b7280,stroke-dasharray:5 4
   class scheduler,spec,dag,messages,L1 puro
   class coordinator,L2 ray
-  class cli,gateway,executor,sandbox,L3 io
+  class cli,gateway,executor,sandbox,logstore,L3 io
   class store,cas,failures,hashing,L4 previsto

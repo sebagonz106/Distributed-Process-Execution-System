@@ -1,0 +1,24 @@
+flowchart LR
+  subgraph Cliente["Cliente (CLI)"]
+    C["dpes.cli<br/>logs <job> <task> [-f] [-o N]"]
+  end
+
+  subgraph NC["Nodo de control (gateway + coordinador + almacén)"]
+    G["gateway.py<br/>API HTTP<br/>GET /jobs/{id}/tasks/{task}/logs<br/>GET /jobs/{id}/events"]
+    L["LogStore (actor, Ray)<br/>append_fragment / read_fragments<br/>log_size / tail_fragments<br/>disco: /var/lib/dpes/logs"]
+  end
+
+  subgraph TR["Trabajador (executor)"]
+    E["executor.py<br/>un intento<br/>hilo emisor de fragmentos"]
+  end
+
+  C -.->|"HTTP GET logs"| G
+  G -.->|llama| L
+  E -.->|"fragmentos (seq, bytes)"| L
+  G -.->|"stream chunked, text/plain"| C
+  G -.->|"feed de eventos"| C
+
+  style C fill:#fef9c3,stroke:#a16207,color:#111827
+  style G fill:#f3f4f6,stroke:#374151,color:#111827
+  style L fill:#dbeafe,stroke:#1d4ed8,color:#111827
+  style E fill:#f3f4f6,stroke:#374151,color:#111827

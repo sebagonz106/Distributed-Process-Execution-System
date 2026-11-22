@@ -726,14 +726,14 @@ cliente que se va, y un cliente que abre y cierra conexiones agota los hilos de
 
 ## 5. Actualización de trazabilidad (plan/00-contexto-y-restricciones.md)
 
-Al cerrar esta fase, actualizar tabla §2:
+Hecha al cerrar la fase: tabla §2 actualizada:
 
 | ID | Funcionalidad | Fases | Estado |
 |----|---------------|-------|--------|
-| R5 | Registro y transmisión de logs | 1, 4 | ✅ cumplido (C4, 2026-11-22) |
+| R5 | Registro y transmisión de logs | 1, 4 | ✅ cumplido (C4, 2026-11-20) |
 
-Y añadir decisiones D15.1–D15.12 y D15.14–D15.19 al registro de decisiones
-abiertas/cerradas (D15.13 queda para §7).
+Decisiones D15.1–D15.12 y D15.14–D15.19 registradas como cerradas en este
+documento (D15.13 queda para §7, crecimiento sin cota).
 
 ---
 
@@ -1166,8 +1166,32 @@ transporte HTTP y `_Client.events`.
   of_its_worker` (muerte real del contenedor, `docker kill`, y `live_nodes`
   parsea el entero de Ray de forma robusta). C4 verde (33 e2e + 9 host).
 
-**Siguiente:** Commit 11 (diagramas y trazabilidad final).
+**Siguiente:** Commit 11 (diagramas y trazabilidad final, 2026-11-21): hecho.
 
+### Commit 11 — Diagramas y trazabilidad final (2026-11-21)
+
+**Qué hay:**
+
+- `plan/diagramas/flujo-logs.mmd` + `flujo-logs.svg` (nuevo): flujo de logs,
+  Cliente → Pasarela → LogStore ← Ejecutor (fragmentos) y Pasarela → Cliente
+  (flujo en vivo).
+- `plan/diagramas/dependencias-modulos.mmd` + `dependencias-modulos.svg`
+  (actualizado): se añade el nodo `logstore.py` (clase E/S, disco), con aristas
+  `executor → logstore` (fragmentos) y `gateway → logstore` (lectura).
+- `plan/00-contexto-y-restricciones.md` §2: R5 pasa a
+  `✅ cumplido (C4, 2026-11-20)`.
+- `plan/15-fase-4-logs.md`: sección 6 cerrada con Commits 1–11 y sección 4
+  con la tabla de aceptación de C4 completa (unit, integración, e2e, host).
+
+**Verificación (D05.1):**
+
+- `flujo-logs.svg` y `dependencias-modulos.svg` regeneradas desde sus `.mmd`
+  con `npx @mermaid-js/mermaid-cli`; ambas abren y contienen los nodos y
+  aristas declarados.
+- Ningún marcador «planificado» queda en el diagrama de módulos: `logstore`
+  aparece como nodo implementado (clase E/S) y no como `previsto`.
+
+---
 
 ---
 
