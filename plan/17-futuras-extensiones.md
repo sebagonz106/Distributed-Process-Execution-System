@@ -163,14 +163,14 @@ Toda extensión nueva **debe** documentarse con las siguientes secciones, numera
 
 | ID  | Decisión | Opción elegida | Razón |
 |-----|----------|----------------|-------|
-| D17.1 | **Clave de deduplicación** | `sha256(json_canonical(spec_task))` donde `spec_task` incluye: `command`, `inputs`, `outputs`, `resources`, `timeout`, `env`, `working_dir`. | Garantiza que tareas idénticas en todo lo que afecta el resultado compartan clave. Excluye `id` y `needs` (son metadata de grafo). |
-| D17.2 | **Ámbito de deduplicación** | **Global al clúster** (todas las tareas de todos los jobs). | Máximo ahorro; la clave ya incluye toda la especificación. |
+| D17.1 | **Clave de deduplicación** | La misma `action_key` de `dpes/hashing.py` (plan/16, D16.1). | Dos tareas solo pueden compartir ejecución si comparten trabajo; reutilizar la clave de acción evita una segunda definición de «idéntico» y deja la caché y el mapa en vuelo alineados. Recursos y plazo quedan fuera porque no cambian lo que el comando produce (D02.12). |
+| D17.2 | **Ámbito de deduplicación** | **Global al clúster** (todas las tareas de todos los jobs). | Máximo ahorro: la clave identifica el trabajo, así que dos tareas iguales en jobs distintos comparten ejecución. |
 | D17.3 | **Vida de la entrada en mapa** | Desde `DISPATCHED` hasta `COMPLETED` / `FAILED` / `CANCELLED` de la tarea original. | Limpieza determinista; no hay fugas. |
 | D17.4 | **Política caché vs. en vuelo** | **En vuelo gana**: si hay tarea en vuelo con la misma clave, se vincula a ella **aunque exista entrada en caché**. | Evita divergencia: la en vuelo puede tener fallos transitorios que la caché no refleja; además, la en vuelo es más fresca (mismo código, mismo entorno actual). |
 | D17.5 | **Semántica de fallo compartido** | Si la tarea original falla con `TASK` (código de salida ≠ 0), la duplicada **también falla con TASK** (mismo código, mismos logs/artefactos). Si falla con `WORKER`/`NETWORK`/`TIMEOUT`, la duplicada **sigue a la original en su reintento** (misma suerte). | Consistencia fuerte; evita que una duplicada «tenga suerte» y pase mientras la original falla. |
-| D17.6 | **Límite de tareas vinculadas** | Sin límite duro; métrica `inflight_dedupe_linked_total` para alertar si se disparan (ej. >1000 en un job). | Casos patológicos (matrices gigantes) se detectan por observabilidad, no por límite arbitrario. |
+| D17.6 | **Límite de tareas vinculadas** | Sin límite duro; se registra el número de vinculadas por clave y se avisa en el log al pasar de un tope configurable. | Los casos patológicos se detectan por observabilidad; un tope duro necesitaría una política de rechazo que nadie ha pedido. |
 | D17.7 | **Persistencia del mapa** | **No persistir** en el diario SQLite. En reinicio del coordinador, el mapa se reconstruye escaneando tareas en estado `DISPATCHED` / `RUNNING` sin `COMPLETED`. | El diario ya tiene esa info; persistir el mapa duplicaría estado y complicaría la reconciliación. |
-| D17.8 | **Observabilidad** | Eventos de log estructurados: `dedupe_hit` (clave, task_id_original, task_id_duplicada), `dedupe_miss`, `dedupe_release`. Métricas Prometheus: `inflight_dedupe_hits_total`, `inflight_dedupe_misses_total`, `inflight_dedupe_linked_gauge`. | Trazabilidad completa para auditoría y depuración. |
+| D17.8 | **Observabilidad** | Eventos con `dpes.log.event` (`dedup wait`, `dedup release`, con la clave y la ejecución original) y, en la vista, `tasks[t].dedup_waiters`. | D10.4–D10.6: los módulos con efectos registran con `event`; no se añaden dependencias ni servicios de métricas (regla 3, D02.13). |
 
 **Cambios en componentes.**
 
@@ -179,8 +179,7 @@ Toda extensión nueva **debe** documentarse con las siguientes secciones, numera
 | `dpes/coordinator.py` | Nuevo atributo `_inflight_dedupe: dict[str, InFlightEntry]` donde `InFlightEntry = (task_id_original, set[task_id_vinculadas], asyncio.Event terminado)`. Lógica en `_dispatch_ready()` antes de encolar en Ray. Nuevo método `_on_task_terminal(task_id, result)` que notifica a vinculadas y limpia entrada. |
 | `dpes/messages.py` | Ninguno (la clave se computa desde `TaskSpec` existente). |
 | `dpes/scheduler.py` | Ninguno (el grafo no cambia; la deduplicación es decisión de despacho). |
-| `dpes/log.py` | Añadir `event_dedupe_hit`, `event_dedupe_miss`, `event_dedupe_release` (nivel `INFO`). |
-| `dpes/metrics.py` (nuevo o extender) | Contadores y gauge de Prometheus para D17.8. |
+| `dpes/log.py` | Ninguno: se reutiliza `event` y sus niveles (D10.4). |
 | `tests/integration/test_inflight_dedupe.py` | Suite completa (ver §3.1.5). |
 
 **Algoritmo (pseudocódigo).**
@@ -188,7 +187,10 @@ Toda extensión nueva **debe** documentarse con las siguientes secciones, numera
 ```python
 # En Coordinator._dispatch_ready(task_id: str) -> None
 spec = self._tasks[task_id].spec
-key = hashlib.sha256(json_canonical(spec)).hexdigest()
+# La misma clave que usa la caché (D17.1): una sola definición de «trabajo idéntico».
+# `inputs` es el mapa de la ronda, con los digests de las dependencias ya resueltos.
+key = action_key(spec.command, spec.env, spec.inputs, spec.outputs,
+                 self._platform_id)
 
 if key in self._inflight_dedupe:
     original_id, linked_set, done_evt = self._inflight_dedupe[key]
@@ -231,7 +233,7 @@ if key in self._inflight_dedupe:
 - Si la original agota reintentos y queda `FAILED(WORKER|NETWORK|TIMEOUT)`, las vinculadas reciben ese mismo fallo.
 - Si la original es `CANCELLED` (por timeout global del job o señal externa), las vinculadas reciben `CANCELLED`.
 
-**Tests requeridos (mínimos para corte C8).**
+**Tests requeridos (mínimos para cerrar E1).**
 
 | Test | Descripción |
 |------|-------------|
@@ -242,7 +244,7 @@ if key in self._inflight_dedupe:
 | `test_dedupe_cache_precedence` | Existe entrada en caché para la clave; llega tarea y hay otra en vuelo → se usa la en vuelo (D17.4). |
 | `test_dedupe_coordinator_restart` | Coordinador reinicia (Fase 8A) con tareas en `DISPATCHED`/`RUNNING` → mapa se reconstruye y deduplicación sigue funcionando. |
 | `test_dedupe_cancel_propagation` | Job cancelado → original `CANCELLED` → vinculadas `CANCELLED`. |
-| `test_dedupe_metrics` | Contadores `hits`, `misses`, gauge `linked` reflejan la actividad. |
+| `test_dedupe_events` | Los eventos `dedup wait` / `dedup release` y la vista muestran la espera y la adopción. |
 
 **Métricas de aceptación.**
 - **Cobertura**: ≥ 90 % en `coordinator.py` líneas nuevas.
@@ -255,9 +257,9 @@ if key in self._inflight_dedupe:
 | Sprint | Entregable | Criterio de_done |
 |--------|------------|------------------|
 | **Sprint 1** (2 días) | Implementación núcleo: mapa, clave, hit/miss, propagación de resultado. Tests unitarios de `coordinator.py` (mockeando Ray). | `py -m unittest tests.unit.test_coordinator_dedupe` en verde. |
-| **Sprint 2** (2 días) | Integración con Ray: `test_dedupe_basic`, `test_dedupe_across_jobs` en clúster Docker. Métricas y logs. | `docker compose ... exec head python -m unittest tests.integration.test_inflight_dedupe` en verde. |
+| **Sprint 2** (2 días) | Integración con Ray: `test_dedupe_basic`, `test_dedupe_across_jobs` en clúster Docker. Eventos y vista. | `docker compose ... exec head python -m unittest tests.integration.test_inflight_dedupe` en verde. |
 | **Sprint 3** (1 día) | Reintentos y fallos compartidos: `test_dedupe_retry_shared`, `test_dedupe_task_failure`. | Tests de integración correspondientes en verde. |
-| **Sprint 4** (1 día) | Recuperación tras reinicio coordinador: `test_dedupe_coordinator_restart`. Documentación en `plan/17-futuras-extensiones.md` (este doc) y actualización de `PROGRESO.md`. | Corte C8 en verde en CI; `PROGRESO.md` actualizado. |
+| **Sprint 4** (1 día) | Recuperación tras reinicio coordinador: `test_dedupe_coordinator_restart`. Documentación en `plan/17-futuras-extensiones.md` (este doc) y actualización de `PROGRESO.md`. | Suite de E1 en verde en CI; `PROGRESO.md` actualizado. |
 
 **Total estimado**: 6 días-hombre (1 persona).  
 **Paralelizable**: Sprint 1–2 son secuenciales; Sprint 3–4 pueden solaparse con T5 (comparación arquitectónica) de la Fase 8 parte A.
@@ -276,7 +278,7 @@ if key in self._inflight_dedupe:
 
 La **deduplicación en vuelo (F9.6)** es una extensión **de alto valor y coste moderado** que encaja naturalmente en la arquitectura tras la Fase 8 parte A (recuperación del coordinador). No es requerida por los requisitos base (R1–R9), pero **eleva el sistema a nivel de CI/CD profesional** (GitHub Actions, Buildkite no la tienen).
 
-**Recomendación**: Implementar en Fase 8 como **extensión opcional con corte C8**, condicionada a:
+**Recomendación**: Implementar en Fase 8 como **extensión opcional (E1)**, condicionada a:
 1. Que la Fase 8 parte A (recuperación coordinador) esté **cerrada y en verde en CI**.
 2. Que queden **≥ 4 días-hombre** antes de la congelación (2026-11-29).
 3. Que los tests de estrés (R2) pasen en el clúster Docker.
