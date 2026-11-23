@@ -22,7 +22,7 @@ Cada extensión recibe un identificador **Ex** y sigue la plantilla de la §2.
 | ID  | Título                          | Requisito base | Estado       | Prioridad | Documento de diseño |
 |-----|---------------------------------|----------------|--------------|-----------|---------------------|
 | E1  | Deduplicación en vuelo (F9.6)   | R9 (extensión) | Propuesta    | Alta      | §3.1                |
-| E2  | —                               | —              | —            | —         | —                   |
+| E2  | Índice canónico de caché (`cache_entries`) | R9 (extensión) | Propuesta | Media | §3.2 |
 | E3  | —                               | —              | —            | —         | —                   |
 
 > **Convención:** al añadir una nueva extensión, incrementar el número (E2, E3…), rellenar la fila en esta tabla y crear su sección en §3 usando la plantilla de §2.
@@ -111,7 +111,7 @@ Toda extensión nueva **debe** documentarse con las siguientes secciones, numera
 | Característica | Caché por contenido (F9.1–F9.5) | Deduplicación en vuelo (F9.6) |
 |----------------|----------------------------------|-------------------------------|
 | **Cuándo actúa** | Después de que una tarea termina y su resultado se guarda en el almacén. | Mientras la tarea original **aún se está ejecutando**. |
-| **Clave** | Hash de entradas + especificación (clave de contenido). | Hash de especificación completa (incluye `resources`, `timeout`, etc.). |
+| **Clave** | Hash de entradas + especificación (clave de contenido, `action_key`). | La misma `action_key` (D17.1): una sola definición de «trabajo idéntico». |
 | **Beneficio** | Evita re-ejecutar trabajo idéntico en trabajos **posteriores**. | Evita lanzar trabajo idéntico **concurrente** dentro del mismo trabajo o entre trabajos simultáneos. |
 | **Garantía** | Resultado bit-a-bit idéntico al original. | Resultado bit-a-bit idéntico al original (misma ejecución). |
 | **Coste de almacenamiento** | Requiere persistir artefactos y metadatos en `BlobStore` / `store`. | Solo requiere mantener una entrada en memoria en el coordinador mientras la tarea vuele. |
@@ -298,19 +298,165 @@ Si no se cumplen, documentar como **deuda técnica conocida** en `plan/17-futura
 
 ---
 
+### 3.2 E2 — Índice canónico de caché (`cache_entries`)
+
+> **Origen:** la caché de C7 (R9) guarda la clave de acción en la propia fila del resultado y la busca con un índice parcial **no único** (plan/16, D16.2).
+> **Estado:** **Propuesta** — diseño completo, no implementada en C7.
+
+#### 3.2.1 Qué es y para qué sirve
+
+**Definición.** Una tabla `cache_entries` con **una fila por clave de acción** (`cache_key` como clave primaria) que apunta al resultado confirmado que la caché sirve, en lugar de deducir la entrada de caché buscando «cualquier fila de `results` con esta clave».
+
+**Escenario canónico.**
+1. El sistema lleva meses acumulando resultados; la tabla `results` tiene varias filas con la misma `cache_key` (dos jobs compilaron lo mismo).
+2. El operador quiere **liberar las entradas dormidas** para que el volumen no crezca sin control.
+3. La evicción borra filas de `cache_entries` —una por clave— y deja `results` intacto: los resultados confirmados siguen siendo consultables por `(job, task, round)` y la regla «un resultado por tarea» no se toca.
+
+**Diferencia con la caché de C7.**
+
+| Característica | Caché de C7 (D16.2) | Índice canónico (E2) |
+|----------------|---------------------|----------------------|
+| **Dónde vive la entrada** | En la fila del resultado (`results.cache_key`) | En una tabla aparte, una fila por clave |
+| **Duplicados por clave** | Varias filas exitosas con la misma clave | Exactamente una fila por clave |
+| **Evicción / TTL** | No prevista (F3.7, D01.8, prioridad W) | `DELETE FROM cache_entries`, sin tocar resultados |
+| **Lectura** | `SELECT ... FROM results WHERE cache_key = ? AND succeeded = 1 LIMIT 1` | `SELECT r.* FROM cache_entries c JOIN results r ON ...` |
+| **Métricas por clave** | Requiere agregación sobre `results` | Contadores en la propia entrada (`hits`, `created_at`) |
+
+#### 3.2.2 Análisis formal de pros y contras
+
+| # | Beneficio / Coste | Justificación técnica |
+|---|-------------------|----------------------|
+| P1 | Una sola fuente de verdad para «qué resultado sirve la caché» | Elimina la ambigüedad de tener N filas candidatas y elegir una con `LIMIT 1`. |
+| P2 | Evicción y TTL sin tocar resultados | `results` es el registro de confirmaciones (S1, plan/02 D02.10); borrar de ahí por política de caché sería incorrecto. |
+| P3 | Métricas por clave baratas | `hits` y `created_at` viven en la entrada; no hay que agregar `results`. |
+| P4 | Punto de anclaje para E1 | El mapa en vuelo puede consultar primero `cache_entries` y luego el estado en memoria, con una política explícita (D17.4). |
+| C1 | Dos tablas y dos sentencias | Añade una escritura por resultado exitoso a la transacción de `save`, y un JOIN en la lectura. |
+| C2 | Migración | Hay que poblar la tabla nueva desde `results` y decidir qué hacer con la columna `cache_key` heredada. |
+| C3 | Riesgo de divergencia entre las dos tablas | Si una escritura no es atómica, una entrada puede apuntar a un resultado inexistente; se mitiga con la FK y una sola transacción. |
+| C4 | Complejidad fuera de R1–R9 | No la pide ningún requisito; es infraestructura para funciones de prioridad W. |
+
+#### 3.2.3 Por qué NO está en el corte C7
+
+1. **No hace falta para R9**: la consulta sobre `results` ya devuelve un acierto correcto.
+2. **El crecimiento está acotado en la práctica**: un acierto de caché no ejecuta ni escribe; solo un *miss* crea fila, y un `action_key` repetido solo genera filas nuevas cuando varias tareas distintas lo ejecutan de verdad.
+3. **La evicción es prioridad W** (F3.7 / D01.8) y C7 no la incluye.
+4. **Dos tablas antes de tener evicción** sería optimización prematura; el índice parcial no único mantiene `O(log n)` la lectura.
+
+#### 3.2.4 Por qué DEBERÍA implementarse después
+
+1. **Requisito real de operación**: un almacén persistente sin política de caducidad acaba creciendo; E2 es la base mínima para acotarlo.
+2. **Habilita E1 con una política clara** de caché frente a en-vuelo (D17.4).
+3. **Migración trivial y reversible**: `results` conserva la columna, así que la vuelta atrás es borrar la tabla nueva.
+4. **Coste bajo**: ~80 líneas en `store.py` + pruebas; el resto del sistema no cambia.
+
+#### 3.2.5 Guía de implementación
+
+**Decisiones de diseño (`D17.x`).**
+
+| ID  | Decisión | Opción elegida | Razón |
+|-----|----------|----------------|-------|
+| D17.9 | **Esquema** | `cache_entries(cache_key TEXT PRIMARY KEY, job TEXT, task TEXT, round INTEGER, created_at REAL NOT NULL DEFAULT 0, hits INTEGER NOT NULL DEFAULT 0, FOREIGN KEY (job, task, round) REFERENCES results(job, task, round))` con `PRAGMA foreign_keys = ON` | Una fila por clave; la FK impide entradas huérfanas. |
+| D17.10 | **Población** | En la misma transacción que `ResultLog.save`: `INSERT OR IGNORE INTO cache_entries (cache_key, job, task, round, created_at) VALUES (?, ?, ?, ?, ?)` cuando el resultado tuvo éxito | Atómico con la confirmación; `OR IGNORE` deja la primera entrada como canónica. |
+| D17.11 | **Lectura** | `SELECT r.result FROM cache_entries c JOIN results r USING (job, task, round) WHERE c.cache_key = ?` y `UPDATE cache_entries SET hits = hits + 1` | Una sola fila candidata; el contador da la métrica sin agregar. |
+| D17.12 | **Migración desde C7** | `INSERT OR IGNORE INTO cache_entries SELECT cache_key, job, task, round, 0 FROM results WHERE succeeded = 1 AND cache_key IS NOT NULL ORDER BY round` | Un solo comando; `created_at = 0` marca las entradas heredadas para que la primera evicción las trate como candidatas. |
+| D17.13 | **Evicción** | `DELETE FROM cache_entries WHERE created_at < ?` (o por antigüedad de `hits`) en un barrido periódico; `results` nunca se toca | Borrar de `results` rompería S1; la caché es un índice, no el registro de confirmaciones. |
+
+**Cambios en componentes.**
+
+| Componente | Cambios |
+|------------|---------|
+| `dpes/store.py` | Tabla nueva en el esquema, migración, población en `save`, lectura en `get_by_cache_key`, método `evict(max_age_s)`. La columna `results.cache_key` se conserva como respaldo y para reconstruir la tabla si hace falta. |
+| `dpes/coordinator.py` | Ninguno: el actor `ResultStore` ya expone `get_by_cache_key`; cambia solo su implementación. |
+| `tests/unit/test_store.py` | Casos de población, lectura con JOIN, migración y evicción. |
+
+**Algoritmo (pseudocódigo).**
+
+```python
+def save(self, key, result, cache_key=None):
+    with self._write_transaction():           # una sola transacción
+        inserted = self._insert_result(key, result, cache_key)
+        if inserted and cache_key and result.succeeded:
+            self._db.execute(
+                "INSERT OR IGNORE INTO cache_entries "
+                "(cache_key, job, task, round, created_at) VALUES (?, ?, ?, ?, ?)",
+                (cache_key, key.job_id, key.task, key.round, time.time()),
+            )
+
+def get_by_cache_key(self, cache_key):
+    row = self._db.execute(
+        "SELECT r.result FROM cache_entries c "
+        "JOIN results r USING (job, task, round) WHERE c.cache_key = ?",
+        (cache_key,),
+    ).fetchone()
+    if row:
+        self._db.execute("UPDATE cache_entries SET hits = hits + 1 WHERE cache_key = ?", (cache_key,))
+    return _decode(row[0]) if row else None
+```
+
+**Manejo de casos frontera.**
+- **Reinicio del coordinador**: la tabla es persistente; no hay estado efímero que reconstruir.
+- **Escritura concurrente de dos jobs**: `INSERT OR IGNORE` deja la primera entrada; ambas filas de `results` se conservan.
+- **Evicción durante una lectura**: la FK y el orden `DELETE` → siguiente `JOIN` evitan servir una entrada borrada.
+- **Resultado borrado de `results`**: hoy no ocurre (nunca se borra un resultado confirmado); si ocurriera, la FK lo impide.
+
+**Tests requeridos (mínimos para cerrar E2).**
+
+| Test | Descripción |
+|------|-------------|
+| `test_entry_created_with_success` | Un éxito con clave crea exactamente una fila en `cache_entries`. |
+| `test_entry_not_created_for_failure` | Un fallo no crea entrada aunque reciba clave. |
+| `test_duplicate_key_keeps_one_entry` | Dos tareas con el mismo trabajo: una entrada canónica, dos filas en `results`. |
+| `test_lookup_uses_canonical_entry` | La lectura devuelve el resultado apuntado y suma `hits`. |
+| `test_migration_from_results` | Una base de C7 migra sus claves existentes con `created_at = 0`. |
+| `test_eviction_leaves_results_intact` | Tras evacuar, `get(job, task, round)` sigue devolviendo el resultado. |
+
+**Métricas de aceptación.**
+- Cobertura ≥ 90 % en las líneas nuevas de `store.py`.
+- Latencia de lectura dentro del 20 % de la consulta actual (JOIN por PK + índice).
+- Cero regresiones en C0–C7.
+
+#### 3.2.6 Planificación sugerida
+
+| Sprint | Entregable | Criterio de_done |
+|--------|------------|------------------|
+| **Sprint 1** (1 día) | Esquema, migración y población en `save`; pruebas unitarias. | `py -m unittest tests.unit.test_store` en verde. |
+| **Sprint 2** (1 día) | Lectura canónica, contador de `hits`, evicción y pruebas; actualización de `plan/16` y `plan/00`. | Suite completa en verde y `plan/` actualizado. |
+
+**Total estimado:** 2 días-hombre (1 persona).
+
+#### 3.2.7 Riesgos residuales y mitigaciones
+
+| Riesgo | Probabilidad | Impacto | Mitigación |
+|--------|--------------|---------|------------|
+| Divergencia entre `cache_entries` y `results` | Baja | Media (acierto incorrecto) | FK + una sola transacción; prueba de escritura fallida que no deja entrada. |
+| Evicción demasiado agresiva | Media | Baja (más ejecuciones) | Umbral configurable y métrica de *misses* para calibrar; nunca se borra `results`. |
+| Migración lenta en una base grande | Baja | Baja (arranque) | Ocurre una vez; `INSERT ... SELECT DISTINCT` sobre un índice ya existente. |
+
+#### 3.2.8 Conclusión y recomendación
+
+Es una extensión **de bajo coste y alto valor operativo**: convierte la caché de C7 en un índice explícito, con una entrada por clave, sin tocar el registro de resultados. No la pide ningún requisito, pero es el paso natural cuando se quiera **caducidad, evicción, métricas por clave o deduplicación en vuelo**.
+
+**Recomendación:** posponer a después de la entrega, y abordarla **antes o junto con E1** si se implementa la deduplicación en vuelo. Condición de entrada: C7 cerrado y en verde.
+
+#### 3.2.9 Trazabilidad
+
+| Requisito | Feature | Estado | Evidencia |
+|-----------|---------|--------|-----------|
+| R9 (extensión) | Caché con índice canónico | **Propuesta** | Este documento (`plan/17-futuras-extensiones.md`) §3.2 |
+| — | D17.9–D17.13 | Decisiones de diseño | §3.2.5 |
+| — | Riesgos | Identificados | §3.2.7 |
+
+---
+
 ## 4. Espacio reservado para futuras extensiones
 
-> **Instrucción:** Para añadir una nueva extensión (E2, E3, …):
+> **Instrucción:** Para añadir una nueva extensión (E3, E4, …):
 > 1. Añadir una fila en la tabla del **§1 Índice**.
 > 2. Crear una sección **§3.x** siguiendo **exactamente** la plantilla del **§2**.
 > 3. Numerar sus decisiones como `D17.y` continuando la secuencia.
 > 4. Actualizar esta sección con una referencia a la nueva sección.
 
-### 4.1 E2 — [Título de la extensión]
-
-*[Pendiente: rellenar usando la plantilla del §2]*
-
-### 4.2 E3 — [Título de la extensión]
+### 4.1 E3 — [Título de la extensión]
 
 *[Pendiente: rellenar usando la plantilla del §2]*
 

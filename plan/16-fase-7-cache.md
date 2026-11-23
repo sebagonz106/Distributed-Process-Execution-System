@@ -15,7 +15,7 @@ solo se sigue su avance.
 |---------|-----|--------|
 | F9.1 | Clave de acción: hash del comando, el entorno, las entradas (ruta→digest), las salidas declaradas y la plataforma | Implementada (Commit 2) |
 | F9.2 | Consulta antes de despachar; con acierto la tarea no se ejecuta y sus artefactos quedan disponibles | Pendiente |
-| F9.3 | Solo se guardan los éxitos | Pendiente |
+| F9.3 | Solo se guardan los éxitos | Implementada (Commit 3) |
 | F9.4 | Claves encadenadas: la clave usa los digests de salida de las dependencias | Pendiente |
 | F9.5 | Exclusión por tarea (`cache: false`) | Pendiente |
 | F9.6 | Dos tareas idénticas en vuelo: la segunda espera a la primera | Fuera de C7 ([17](17-futuras-extensiones.md), D16.9) |
@@ -34,10 +34,10 @@ solo se sigue su avance.
 ### D16.2 — La caché vive en el almacén de resultados (`dpes/store.py`), no en un componente aparte
 
 - **Contexto:** La Fase 6 (D12.1) introdujo `dpes/store.py` con SQLite y la regla «el primero que escribe gana» para guardar `TaskResult` bajo la clave `(job, task, round)`. La caché necesita consultar «¿existe un resultado exitoso para esta especificación?» y, en caso afirmativo, leer sus salidas.
-- **Opciones:** (a) tabla `cache` separada con clave `cache_key → result_key`; (b) reutilizar la tabla `results` existente añadiendo un índice por `cache_key`; (c) un almacén de clave-valor distinto (Redis, etcd).
-- **Decisión:** (b) Extender `store.py` con una columna `cache_key` en la tabla `results` y un índice único parcial `WHERE succeeded = 1`. La consulta de caché es `SELECT * FROM results WHERE cache_key = ? AND succeeded = 1 LIMIT 1`.
-- **Porqué:** (1) Un solo almacén, un solo esquema, una sola transacción para «guardar resultado + poblar caché». (2) La regla «el primero que escribe gana» (D12.1) ya resuelve la carrera entre dos trabajadores que terminan la misma ronda: solo uno escribe, el otro leerá ese resultado en su reconciliación. (3) No añade dependencias externas (cumple regla 3 del CLAUDE.md). (4) SQLite con `WAL` soporta lecturas concurrentes mientras se escribe.
-- **Consecuencia:** `store.py` gana `get_by_cache_key(cache_key: str) -> Optional[TaskResult]` y `save_result` escribe `cache_key` cuando `result.succeeded`. El índice parcial garantiza que solo resultados exitosos son cachables.
+- **Opciones:** (a) tabla `cache` separada con clave `cache_key → result_key`; (b) reutilizar la tabla `results` existente añadiendo una columna `cache_key` y un índice parcial; (c) un almacén de clave-valor distinto (Redis, etcd).
+- **Decisión:** (b) Extender `store.py` con una columna `cache_key` en la tabla `results` y un índice parcial `WHERE succeeded = 1`, **no único**. La consulta de caché es `SELECT result FROM results WHERE cache_key = ? AND succeeded = 1 LIMIT 1`.
+- **Porqué:** (1) Un solo almacén, un solo esquema, una sola sentencia para «guardar resultado + poblar caché». (2) La regla «el primero que escribe gana» (D12.1) ya resuelve la carrera entre dos trabajadores que terminan la misma ronda: solo uno escribe, el otro leerá ese resultado en su reconciliación. (3) No añade dependencias externas (cumple regla 3 del CLAUDE.md). (4) SQLite con `WAL` soporta lecturas concurrentes mientras se escribe. (5) El índice **no es único** porque dos tareas distintas —distinto `job`, `task` o `round`— pueden hacer el mismo trabajo y ambas deben conservar su fila en `results` (S1, «un resultado por tarea»). Un índice único haría que `INSERT OR IGNORE` descartara la **fila completa** de la segunda tarea, no solo su entrada de caché: se perdería un resultado confirmado y `save` devolvería `None`. Como ambas filas describen el mismo trabajo (misma `action_key`), cualquiera sirve como acierto y `LIMIT 1` elige una. El crecimiento está acotado en la práctica porque un acierto no ejecuta ni escribe: solo un *miss* crea fila.
+- **Consecuencia:** `store.py` gana `get_by_cache_key(cache_key: str) -> Optional[TaskResult]` y `save(key, result, cache_key)` escribe la clave en la misma fila cuando `result.succeeded`. El índice parcial deja fuera de la caché lo que no tuvo éxito. El actor `ResultStore` de `coordinator.py`, que hoy reenvía `save_result(key, result)`, expone ambos métodos al coordinador en el Commit 4; `store.py` no cambia más. **Si más adelante se necesita evicción, TTL, métricas de caché o deduplicación en vuelo**, esos requisitos piden un índice canónico con una fila por clave; se añadirá entonces una tabla `cache_entries` (PK `cache_key`, FK a `results`) encima de esta, sin migrar ni tocar `results` ([17-futuras-extensiones.md](17-futuras-extensiones.md), E2).
 
 ### D16.3 — Consulta de caché atómica en el coordinador, antes de crear el intento
 
@@ -53,7 +53,7 @@ solo se sigue su avance.
 - **Opciones:** (a) cachear cualquier resultado con código 0; (b) cachear solo `succeeded == True`; (c) cachear también fallos de infraestructura para no reintentarlos.
 - **Decisión:** (b) Estricto: `cache_key` se escribe **solo** si `result.succeeded`. La consulta de caché **solo** devuelve resultados con `succeeded == True`.
 - **Porqué:** (1) Un fallo de tarea (`TASK`, código ≠ 0) no debe ocultarse: el usuario debe ver el fallo cada vez (R6). (2) Un fallo de infraestructura (`WORKER`, `NETWORK`) no es determinista: reintentar puede tener éxito. Cachearlo convertiría un fallo transitorio en permanente. (3) La regla «el primero que escribe gana» (D12.1) ya protege contra carreras: si dos intentos de la misma ronda terminan, solo el primero escribe; el segundo leerá el resultado en la reconciliación (Fase 6).
-- **Consecuencia:** Los reintentos de infraestructura (misma ronda, misma `cache_key`) **no** consultan la caché al reintentar: el coordinador ya sabe que la ronda anterior no tuvo éxito (si la tuvo, la tarea habría terminado). Solo las **nuevas rondas** (reintentos de `TASK` o nuevo trabajo) consultan la caché.
+- **Consecuencia:** Los reintentos de infraestructura (misma ronda, misma `cache_key`) **no** consultan la caché al reintentar: el coordinador ya sabe que la ronda anterior no tuvo éxito (si la tuvo, la tarea habría terminado). Solo las **nuevas rondas** (reintentos de `TASK` o nuevo trabajo) consultan la caché. La columna `succeeded` de `results` no es una segunda definición de éxito: se escribe con `int(result.succeeded)` (D06.2) y existe solo para que SQLite pueda mantener un índice parcial sobre ella, cosa que no puede hacer sobre el JSON del resultado.
 
 ### D16.5 — Acierto de caché: reutilización de salidas sin ejecutar
 
@@ -67,7 +67,7 @@ solo se sigue su avance.
 
 - **Contexto:** Si no hay acierto, la tarea se ejecuta normalmente. Al terminar con éxito, su resultado debe estar disponible para futuras tareas idénticas.
 - **Opciones:** (a) el ejecutor escribe en la caché al terminar; (b) el coordinador escribe en la caché al recibir `TaskResult` exitoso; (c) un proceso asíncrono popula la caché.
-- **Decisión:** (b) El coordinador, al procesar `TaskResult` con `succeeded == True` en la reconciliación (Fase 6) o en la ruta normal, llama a `store.save_result(result)` que ya escribe `cache_key` (D16.2). Es parte de la misma transacción que guarda el resultado por `(job, task, round)`.
+- **Decisión:** (b) El coordinador, al procesar `TaskResult` con `succeeded == True` en la reconciliación (Fase 6) o en la ruta normal, llama a `ResultLog.save` a través del actor `ResultStore` —`save_result(key, result, cache_key)`—, que escribe la clave en la misma fila del resultado (D16.2). Una sola sentencia: no hay estado intermedio en el que el resultado esté confirmado y la caché no.
 - **Porqué:** (1) El coordinador es quien conoce la `cache_key` (la construyó para consultar). (2) Una sola escritura atómica: resultado por ronda + entrada de caché. (3) Si el guardado falla (ej. contención SQLite), la transacción revierte y el coordinador reintentará la reconciliación (Fase 6).
 - **Consecuencia:** No hay lógica de caché en el ejecutor. La población es efecto colateral del guardado exitoso.
 
@@ -89,7 +89,7 @@ solo se sigue su avance.
 
 ### D16.9 — La deduplicación en vuelo (F9.6) queda fuera de C7
 
-- **Contexto:** F9.6 (prioridad C) pide que, si dos tareas idénticas están en vuelo, la segunda espere a la primera. La caché de esta fase solo actúa sobre resultados ya guardados; las dos tareas concurrentes ejecutarían por separado y la segunda escribiría su resultado, que el índice descartaría por `INSERT OR IGNORE` (D16.2).
+- **Contexto:** F9.6 (prioridad C) pide que, si dos tareas idénticas están en vuelo, la segunda espere a la primera. La caché de esta fase solo actúa sobre resultados ya guardados: las dos tareas concurrentes ejecutarían por separado y la segunda escribiría su propio resultado, de modo que el trabajo se duplica. La caché no lo impide porque aún no había nada guardado cuando la segunda consultó.
 - **Opciones:** (a) implementarla dentro de C7 con un mapa `action_key → resultado pendiente` en el coordinador; (b) dejarla documentada como extensión y cerrar C7 sin ella; (c) descartarla.
 - **Decisión:** (b) Queda documentada como extensión E1 en [17-futuras-extensiones.md](17-futuras-extensiones.md), con diseño, riesgos y planificación.
 - **Porqué:** es la primera candidata a recorte (D03.6) y no afecta a la corrección: sin ella el resultado final es el mismo, solo se gasta trabajo redundante. El mapa en vuelo añade estado efímero al actor, tiempos de espera, cancelación y pruebas de concurrencia; C7 ya ocupa sus días (corte el 28 de noviembre). Además, el escenario que la justifica —muchos clientes enviando lo mismo a la vez— no aparece en la demostración.
@@ -100,16 +100,19 @@ solo se sigue su avance.
 ### `dpes/store.py` (extiende Fase 6)
 
 ```python
-# Esquema extendido
-# results table: ..., cache_key TEXT, succeeded BOOLEAN
-# Índice: CREATE UNIQUE INDEX idx_cache_key ON results(cache_key) WHERE succeeded = 1
+# Esquema extendido (la fila del resultado es también la entrada de caché)
+# results: job, task, round, result, cache_key TEXT, succeeded INTEGER
+# Índice: CREATE INDEX idx_results_cache_key ON results(cache_key)
+#         WHERE succeeded = 1                            -- parcial y no único (D16.2)
+
+def save(self, key: ResultKey, result: TaskResult,
+         cache_key: Optional[str] = None) -> TaskResult:
+    """Confirma el resultado de la ronda y, si tuvo éxito, lo deja alcanzable
+       por cache_key en la misma sentencia. Devuelve el ganador."""
 
 def get_by_cache_key(self, cache_key: str) -> Optional[TaskResult]:
-    """Devuelve el primer resultado exitoso con esta cache_key, o None."""
-
-def save_result(self, result: TaskResult, cache_key: str) -> None:
-    """Guarda resultado por (job, task, round) y, si succeeded, por cache_key.
-       Transacción única: o las dos escrituras o ninguna."""
+    """El resultado exitoso registrado con esta clave, o None.
+       Una clave vacía no encuentra nada."""
 ```
 
 ### `dpes/scheduler.py` / `dpes/coordinator.py` (lógica de despacho)
@@ -154,7 +157,7 @@ class JobView:
 | Nivel | Fichero | Qué comprueba |
 |-------|---------|---------------|
 | Unitarias | `tests/unit/test_hashing.py` | **Commit 2**: `action_key` determinista; cambia con el comando (y su orden), el entorno, un digest de entrada, una salida, la plataforma o la versión; el orden de las claves del JSON y el de las salidas no lo cambia; plataforma vacía rechazada; 64 hexadecimales sin prefijo |
-| Unitarias | `tests/unit/test_store.py` | `get_by_cache_key` devuelve None si no hay éxito; devuelve resultado si succeeded; índice parcial rechaza duplicados exitosos; transacción atómica save_result |
+| Unitarias | `tests/unit/test_store.py` | **Commit 3**: `get_by_cache_key` no encuentra nada antes de guardar; encuentra un éxito guardado con clave; nunca encuentra un resultado sin éxito ni una clave vacía; la ronda confirmada conserva la clave del intento que ganó; dos tareas con el mismo trabajo conservan cada una su fila; el acierto sobrevive a reabrir; la tabla registra `succeeded`; una fila nunca se ve sin su clave y un guardado que falla no deja fila; una tabla anterior gana las columnas —también si el cierre se interrumpió entre las dos— y sus filas siguen ahí |
 | Unitarias | `tests/unit/test_scheduler_cache.py` | Acierto: tarea marcada SUCCEEDED sin intento, outputs reutilizados, cache_stats.hits++; Fallo: intento creado, cache_stats.misses++; Reintento de infraestructura (misma ronda) no consulta caché |
 | Integración | `tests/integration/test_cache.py` | Dos tareas idénticas en trabajadores distintos: segunda acierta en caché; blob reutilizado desde CAS; vista muestra cache_hit; `cache: false` calcula clave pero no consulta (F9.5) |
 | Extremo a extremo | `tests/e2e/test_cache.py` | **Corte C7**: trabajo con dos tareas idénticas consecutivas; segunda termina instantáneamente, sin logs de ejecutor, artifacts correctos |
@@ -171,6 +174,6 @@ Al cerrar esta fase, actualizar `plan/00-contexto-y-restricciones.md`:
 
 - **Orden de archivos:** 1) `hashing.py` (clave de acción), 2) `store.py` (esquema + consultas), 3) `scheduler.py` (consulta antes de despachar), 4) `coordinator.py` (población al guardar), 5) `spec.py` (cache_stats en vista), 6) `cli.py` (comando `cache-stats`).
 - **De dónde sale `platform_id`:** es configuración del coordinador (imagen de trabajadores y versión del compilador), no algo que calcule el ejecutor: así dos trabajadores de la misma imagen producen la misma clave. Commit 4 lo pasa a `action_key`.
-- **Migración BD:** `store.py` ejecuta `ALTER TABLE results ADD COLUMN cache_key TEXT` + `CREATE UNIQUE INDEX ...` al inicializar. `IF NOT EXISTS` lo hace idempotente.
+- **Migración BD:** al abrirse, `store.py` mira `PRAGMA table_info(results)` y añade `cache_key` y `succeeded` si faltan; `succeeded` se rellena leyendo cada fila, para no afirmar que un éxito falló, y las filas viejas quedan sin clave: se confirmaron antes de que hubiera caché y un resultado no guarda el comando con el que se puede reconstruir. `CREATE INDEX IF NOT EXISTS` lo hace idempotente.
 - **Tamaño de blobs para `bytes_saved`:** `cas.py` expone `get_size(digest) -> int`. El coordinador suma `sum(cas.get_size(d) for d in result.outputs.values())` al contabilizar acierto.
 - **Sin librerías nuevas:** solo `hashlib` (stdlib), `sqlite3` (stdlib), `dataclasses` (stdlib).

@@ -1,3 +1,5 @@
+import dataclasses
+import json
 import os
 import sqlite3
 import tempfile
@@ -5,11 +7,14 @@ import time
 import unittest
 
 from dpes.failures import FailureClass
+from dpes.hashing import action_key
 from dpes.messages import ResultKey, TaskResult
 from dpes.spec import parse_job
 from dpes.store import Journal, ResultLog
 
 KEY = ResultKey("job-1", "compile", 0)
+NEXT_ROUND = ResultKey("job-1", "compile", 1)
+OTHER_JOB = ResultKey("job-2", "compile", 0)
 SPEC = parse_job({"tasks": {
     "compile": {
         "command": ["cc", "-c", "main.c"], "env": {"CC": "gcc"},
@@ -20,6 +25,15 @@ SPEC = parse_job({"tasks": {
     "link": {"command": ["cc", "main.o"], "needs": ["compile"],
              "outputs": ["app"]},
 }})
+# The key of the compile task above (plan/16, D16.1).
+CACHE_KEY = action_key(
+    ("cc", "-c", "main.c"), {"CC": "gcc"}, {"main.c": "sha256:" + "b" * 64},
+    ("main.o",), "linux/amd64:gcc-13",
+)
+OTHER_KEY = action_key(
+    ("cc", "-c", "main.c"), {"CC": "gcc"}, {"main.c": "sha256:" + "b" * 64},
+    ("main.o",), "linux/arm64:gcc-13",
+)
 
 
 def result(execution_id, exit_code=0):
@@ -31,6 +45,34 @@ def result(execution_id, exit_code=0):
         missing_outputs=("report.txt",),
         output_tail="compilé ✓\n",
     )
+
+
+def success(execution_id):
+    """A result that counts as a success (D06.2): exit code 0, nothing missing."""
+    return TaskResult(
+        execution_id=execution_id,
+        exit_code=0,
+        timed_out=False,
+        outputs={"out/main.o": "sha256:" + "a" * 64},
+    )
+
+
+def text(stored):
+    """A result as it sits in the database."""
+    return json.dumps(dataclasses.asdict(stored), ensure_ascii=False)
+
+
+def stored_row(path, key):
+    """(succeeded, cache_key) as written for `key`."""
+    db = sqlite3.connect(path)
+    try:
+        return db.execute(
+            "SELECT succeeded, cache_key FROM results "
+            "WHERE job = ? AND task = ? AND round = ?",
+            (key.job_id, key.task, key.round),
+        ).fetchone()
+    finally:
+        db.close()
 
 
 class ResultLogTraceTest(unittest.TestCase):
@@ -128,6 +170,178 @@ class ResultLogTest(unittest.TestCase):
         b = other.save(KEY, result("job-1/compile/0/2", exit_code=1))
 
         self.assertEqual(a, b)
+
+
+class ResultLogCacheTest(unittest.TestCase):
+    """The cache is a lookup over confirmed successes (plan/16, D16.2)."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.path = os.path.join(directory.name, "results.sqlite")
+        self.log = self.open()
+
+    def open(self):
+        log = ResultLog(self.path)
+        self.addCleanup(log.close)
+        return log
+
+    def row(self, key):
+        return stored_row(self.path, key)
+
+    def test_no_key_is_found_before_anything_is_saved(self):
+        self.assertIsNone(self.log.get_by_cache_key(CACHE_KEY))
+
+    def test_a_succeeded_result_is_found_by_its_key(self):
+        self.log.save(KEY, success("job-1/compile/0/1"), CACHE_KEY)
+
+        self.assertEqual(success("job-1/compile/0/1"),
+                         self.log.get_by_cache_key(CACHE_KEY))
+
+    def test_a_result_that_did_not_succeed_is_never_cached(self):
+        # Exit code 0 but a declared output is missing: not a success (D06.2).
+        self.log.save(KEY, result("job-1/compile/0/1"), CACHE_KEY)
+
+        self.assertIsNone(self.log.get_by_cache_key(CACHE_KEY))
+        self.assertEqual((0, None), self.row(KEY))
+
+    def test_a_success_without_a_key_is_not_cached(self):
+        self.log.save(KEY, success("job-1/compile/0/1"))
+
+        self.assertIsNone(self.log.get_by_cache_key(CACHE_KEY))
+        self.assertEqual(success("job-1/compile/0/1"), self.log.get(KEY))
+
+    def test_an_empty_key_matches_nothing(self):
+        self.log.save(KEY, success("job-1/compile/0/1"), "")
+
+        self.assertIsNone(self.log.get_by_cache_key(""))
+
+    def test_the_confirmed_round_keeps_the_key_of_the_attempt_that_won(self):
+        self.log.save(KEY, success("job-1/compile/0/1"), CACHE_KEY)
+
+        self.log.save(KEY, success("job-1/compile/0/2"), OTHER_KEY)
+
+        self.assertEqual(success("job-1/compile/0/1"),
+                         self.log.get_by_cache_key(CACHE_KEY))
+        self.assertIsNone(self.log.get_by_cache_key(OTHER_KEY))
+
+    def test_two_tasks_that_did_the_same_work_both_keep_their_result(self):
+        # "One result per task" does not depend on which task owns the entry.
+        self.log.save(KEY, success("job-1/compile/0/1"), CACHE_KEY)
+        self.log.save(OTHER_JOB, success("job-2/compile/0/1"), CACHE_KEY)
+
+        self.assertEqual(success("job-1/compile/0/1"), self.log.get(KEY))
+        self.assertEqual(success("job-2/compile/0/1"), self.log.get(OTHER_JOB))
+        self.assertIn(self.log.get_by_cache_key(CACHE_KEY),
+                      (success("job-1/compile/0/1"),
+                       success("job-2/compile/0/1")))
+
+    def test_the_cache_survives_reopening(self):
+        self.log.save(KEY, success("job-1/compile/0/1"), CACHE_KEY)
+        self.log.close()
+
+        self.assertEqual(success("job-1/compile/0/1"),
+                         self.open().get_by_cache_key(CACHE_KEY))
+
+    def test_a_row_is_never_visible_without_its_key(self):
+        # Result and key are one write: another reader never sees half of it.
+        other = self.open()
+        self.assertIsNone(other.get_by_cache_key(CACHE_KEY))
+
+        self.log.save(KEY, success("job-1/compile/0/1"), CACHE_KEY)
+
+        self.assertEqual((1, CACHE_KEY), stored_row(self.path, KEY))
+        self.assertEqual(success("job-1/compile/0/1"),
+                         other.get_by_cache_key(CACHE_KEY))
+
+    def test_a_save_that_fails_leaves_no_row_behind(self):
+        # Encoding happens before the insert, so nothing is half-written.
+        broken = TaskResult(
+            execution_id="job-1/compile/0/1", exit_code=0, timed_out=False,
+            outputs={"out/main.o": object()},
+        )
+
+        with self.assertRaises(TypeError):
+            self.log.save(KEY, broken, CACHE_KEY)
+
+        self.assertIsNone(self.log.get(KEY))
+        self.assertIsNone(self.log.get_by_cache_key(CACHE_KEY))
+
+    def test_the_table_says_which_results_succeeded(self):
+        self.log.save(KEY, success("job-1/compile/0/1"), CACHE_KEY)
+        self.log.save(NEXT_ROUND, result("job-1/compile/1/1"))
+
+        self.assertEqual((1, CACHE_KEY), self.row(KEY))
+        self.assertEqual((0, None), self.row(NEXT_ROUND))
+
+
+class ResultLogMigrationTest(unittest.TestCase):
+    """A results table written before the cache opens and keeps its rows."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.path = os.path.join(directory.name, "results.sqlite")
+
+    def old_table(self, *rows):
+        # The schema as it was before the cache (plan/12), with rows in it.
+        old = sqlite3.connect(self.path)
+        old.execute(
+            "CREATE TABLE results (job TEXT NOT NULL, task TEXT NOT NULL, "
+            "round INTEGER NOT NULL, result TEXT NOT NULL, "
+            "PRIMARY KEY (job, task, round))"
+        )
+        old.executemany("INSERT INTO results VALUES (?, ?, ?, ?)", rows)
+        old.commit()
+        old.close()
+
+    def open(self):
+        log = ResultLog(self.path)
+        self.addCleanup(log.close)
+        return log
+
+    def test_old_rows_keep_their_result_and_gain_a_truthful_flag(self):
+        self.old_table(
+            ("job-1", "compile", 0, text(success("job-1/compile/0/1"))),
+            ("job-1", "compile", 1, text(result("job-1/compile/1/1"))),
+        )
+
+        log = self.open()
+
+        self.assertEqual(success("job-1/compile/0/1"), log.get(KEY))
+        self.assertEqual(result("job-1/compile/1/1"), log.get(NEXT_ROUND))
+        self.assertEqual((1, None), stored_row(self.path, KEY))
+        self.assertEqual((0, None), stored_row(self.path, NEXT_ROUND))
+
+    def test_nothing_was_cached_before_the_cache_existed(self):
+        self.old_table(("job-1", "compile", 0, text(success("e1"))))
+
+        log = self.open()
+
+        self.assertEqual(success("e1"), log.get(KEY))
+        self.assertIsNone(log.get_by_cache_key(CACHE_KEY))
+
+    def test_new_rows_of_a_migrated_table_can_be_cached(self):
+        self.old_table()
+        log = self.open()
+
+        log.save(KEY, success("job-1/compile/0/1"), CACHE_KEY)
+
+        self.assertEqual(success("job-1/compile/0/1"),
+                         log.get_by_cache_key(CACHE_KEY))
+
+    def test_a_table_half_migrated_still_gains_its_flag(self):
+        # A crash between the two columns must not stop the second one.
+        self.old_table(("job-1", "compile", 0, text(success("e1"))))
+        db = sqlite3.connect(self.path)
+        db.execute("ALTER TABLE results ADD COLUMN cache_key TEXT")
+        db.commit()
+        db.close()
+
+        log = self.open()
+
+        self.assertEqual(success("e1"), log.get(KEY))
+        self.assertEqual((1, None), stored_row(self.path, KEY))
 
 
 class JournalTest(unittest.TestCase):

@@ -2,7 +2,9 @@
 
 Confirmed results, where the first writer wins (plan/02, D02.10; plan/12): one
 row per result key (job, task, round). Saving inserts only if the key is new
-and then reads the row back, so every writer learns the winner.
+and then reads the row back, so every writer learns the winner. A row of a
+successful result also carries its action key, which makes the content cache
+(plan/16, D16.2) a lookup over confirmed results instead of a second store.
 
 The coordinator's journal (plan/14): its calls to the state machine, in order.
 """
@@ -26,9 +28,23 @@ CREATE TABLE IF NOT EXISTS results (
     task TEXT NOT NULL,
     round INTEGER NOT NULL,
     result TEXT NOT NULL,
+    cache_key TEXT,
+    succeeded INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (job, task, round)
 )
 """
+# The content cache is a lookup by action key over confirmed results
+# (plan/16, D16.2). The index is partial, so attempts that failed stay
+# out of it, and it is not unique: two tasks may do the same work and each
+# keeps its own row, which is what "one result per task" needs.
+_CACHE_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_results_cache_key
+    ON results(cache_key) WHERE succeeded = 1
+"""
+_RESULTS_ADD_CACHE = "ALTER TABLE results ADD COLUMN cache_key TEXT"
+_RESULTS_ADD_SUCCEEDED = (
+    "ALTER TABLE results ADD COLUMN succeeded INTEGER NOT NULL DEFAULT 0"
+)
 _JOURNAL_SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
     seq INTEGER PRIMARY KEY,
@@ -55,12 +71,58 @@ def _connect(path, schema):
 class ResultLog:
     def __init__(self, path):
         self._db = _connect(path, _SCHEMA)
+        self._add_cache_columns()
+        self._db.execute(_CACHE_INDEX)
 
-    def save(self, key: ResultKey, result: TaskResult) -> TaskResult:
-        """Confirm `result` for `key` unless one already is; the winner."""
+    def _add_cache_columns(self):
+        """Give a table written before the cache (D16.2) its columns.
+
+        `succeeded` is filled from each stored result instead of being left at
+        its default, so the column never claims that a success failed. The
+        column and its values arrive in one transaction: a crash cannot leave
+        half the table flagged. The key of old rows stays empty: they were
+        confirmed before any cache existed and no key can be rebuilt from a
+        result, which holds no command.
+        """
+        columns = {row[1] for row in
+                   self._db.execute("PRAGMA table_info(results)")}
+        if "cache_key" not in columns:  # one statement, so atomic on its own
+            self._db.execute(_RESULTS_ADD_CACHE)
+        if "succeeded" in columns:
+            return
+        self._db.execute("BEGIN")
+        try:
+            self._db.execute(_RESULTS_ADD_SUCCEEDED)
+            rows = self._db.execute(
+                "SELECT job, task, round, result FROM results"
+            ).fetchall()
+            for job, task, round_, text in rows:
+                self._db.execute(
+                    "UPDATE results SET succeeded = ? "
+                    "WHERE job = ? AND task = ? AND round = ?",
+                    (int(_decode(text).succeeded), job, task, round_),
+                )
+            self._db.execute("COMMIT")
+        except Exception:
+            self._db.execute("ROLLBACK")
+            raise
+
+    def save(self, key: ResultKey, result: TaskResult,
+             cache_key: str | None = None) -> TaskResult:
+        """Confirm `result` for `key` unless one already is; the winner.
+
+        A successful result is registered in the cache under `cache_key`
+        (plan/16, D16.2): the result row is the cache entry, so both land in
+        the same statement. Failures are never given a key, and a round that
+        was already confirmed keeps the key of the attempt that won it.
+        """
+        registered = cache_key if cache_key and result.succeeded else None
         inserted = self._db.execute(
-            "INSERT OR IGNORE INTO results VALUES (?, ?, ?, ?)",
-            (key.job_id, key.task, key.round, _encode(result)),
+            "INSERT OR IGNORE INTO results "
+            "(job, task, round, result, cache_key, succeeded) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (key.job_id, key.task, key.round, _encode(result), registered,
+             int(result.succeeded)),
         ).rowcount == 1
         winner = self.get(key)
         eid = result.execution_id
@@ -79,6 +141,21 @@ class ResultLog:
             "SELECT result FROM results WHERE job = ? AND task = ? "
             "AND round = ?",
             (key.job_id, key.task, key.round),
+        ).fetchone()
+        return _decode(row[0]) if row else None
+
+    def get_by_cache_key(self, cache_key: str):
+        """The confirmed success registered under `cache_key`, or None.
+
+        Only rows flagged as successes are candidates (D16.4), and an empty key
+        matches nothing: a caller with no key is asking for no cache.
+        """
+        if not cache_key:
+            return None
+        row = self._db.execute(
+            "SELECT result FROM results WHERE cache_key = ? "
+            "AND succeeded = 1 LIMIT 1",
+            (cache_key,),
         ).fetchone()
         return _decode(row[0]) if row else None
 
