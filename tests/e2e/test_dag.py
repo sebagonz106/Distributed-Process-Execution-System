@@ -15,7 +15,10 @@ TIMED = 'echo "$(hostname) $(date +%s.%N)"; sleep 2; date +%s.%N'
 
 
 def timed(**fields):
-    return {"command": ["sh", "-c", TIMED], **fields}
+    # The timings and worker names in the output are what these tests read,
+    # so the task must run: a cached result would report an older execution
+    # (plan/16, F9.5).
+    return {"command": ["sh", "-c", TIMED], "cache": False, **fields}
 
 
 def interval(task):

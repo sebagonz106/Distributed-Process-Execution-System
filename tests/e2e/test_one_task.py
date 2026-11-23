@@ -18,7 +18,10 @@ class OneTaskTest(unittest.TestCase):
         wait_for_gateway()
 
     def run_task(self, **task):
-        code, view = run_job({"t": task})
+        # Every test here reads what the execution did -- its output, its exit
+        # code, where it ran -- so none may be served from the cache
+        # (plan/16, F9.5).
+        code, view = run_job({"t": {"cache": False, **task}})
         return code, view["tasks"]["t"]
 
     def test_a_successful_task_shows_its_output(self):

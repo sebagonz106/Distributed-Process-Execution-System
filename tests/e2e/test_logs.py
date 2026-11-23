@@ -60,6 +60,10 @@ class LogsTest(unittest.TestCase):
         wait_for_gateway()
 
     def run_job(self, tasks, expected_code=0):
+        # These tests watch the log of an attempt, so no task may be served
+        # from the content cache instead of running (plan/16, F9.5).
+        tasks = {name: {"cache": False, **task}
+                 for name, task in tasks.items()}
         code, job_id, err = submit(tasks)
         self.assertEqual(0, code, err)
         code, view = wait(job_id)
@@ -123,7 +127,7 @@ class LogsTest(unittest.TestCase):
 
     def test_following_prints_while_the_task_still_runs(self):
         code, job_id, err = submit({"t": {"command": [
-            "sh", "-c", "echo first; sleep 6; echo second"]}})
+            "sh", "-c", "echo first; sleep 6; echo second"], "cache": False}})
         self.assertEqual(0, code, err)
         process = subprocess.Popen(
             CLI + ["--url", URL, "logs", job_id.strip(), "t", "-f"],

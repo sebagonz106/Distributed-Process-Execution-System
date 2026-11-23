@@ -24,6 +24,7 @@ class Blobs(dict):
         super().__init__(*args)
         self.results = {}
         self.saves = []
+        self.cache_keys = []  # the cache key each save carried (plan/16)
         self.fragments = []  # (seq, data) as the log store took them
         self.closed = []  # execution ids whose log was ended
 
@@ -34,8 +35,9 @@ class Blobs(dict):
         self[digest(data)] = data
         return digest(data)
 
-    def save_result(self, key, result):
+    def save_result(self, key, result, cache_key=None):
         self.saves.append((key, result))
+        self.cache_keys.append(cache_key)
         return self.results.setdefault(key, result)
 
     def append_fragment(self, execution_id, seq, data):
@@ -104,8 +106,9 @@ class SavesFirst(Blobs):
         super().__init__()
         self.failures = failures
 
-    def save_result(self, key, result):
+    def save_result(self, key, result, cache_key=None):
         self.saves.append((key, result))
+        self.cache_keys.append(cache_key)
         if len(self.saves) <= self.failures:
             raise ConnectionError("store unreachable")
         return self.results.setdefault(key, result)
@@ -160,6 +163,23 @@ class ConfirmationTest(unittest.TestCase):
                 store)
 
         self.assertEqual([], store.saves)
+
+    def test_the_attempts_cache_key_goes_with_the_result(self):
+        # plan/16, D16.6: one statement, so a confirmed success is reachable
+        # by its work at once.
+        store = Blobs()
+
+        execute(attempt("echo hi", cache_key="k" * 64), store)
+
+        self.assertEqual(["k" * 64], store.cache_keys)
+
+    def test_an_attempt_without_a_key_saves_without_one(self):
+        # A task that opted out, or one whose work must not be reused (F9.5).
+        store = Blobs()
+
+        execute(attempt("echo hi"), store)
+
+        self.assertEqual([""], store.cache_keys)
 
 
 class Broken:

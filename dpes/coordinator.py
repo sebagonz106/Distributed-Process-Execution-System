@@ -3,14 +3,17 @@
 The actor is a thin shell around `scheduler.Job`: it turns the launches the
 state machine asks for into Ray tasks, keeps each attempt's deadlines
 (plan/09, D09.4), feeds back what it observed, classified (D09.1), and
-describes all of it in the logs (plan/10). Each call it makes to the state
-machine goes to a journal first; when Ray restarts the actor, replaying the
-journal rebuilds it (plan/14).
+describes all of it in the logs (plan/10). Before it hands an attempt out, it
+asks the store whether that work already succeeded, and serves the stored
+result instead (plan/16, D16.3). Each call it makes to the state machine goes
+to a journal first; when Ray restarts the actor, replaying the journal rebuilds
+it (plan/14).
 """
 
 import asyncio
 import dataclasses
 import logging
+import os
 import time
 import uuid
 
@@ -19,7 +22,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from dpes.cas import BlobDir
 from dpes.failures import DEADLINE, RESTARTED, classify
-from dpes.hashing import digest
+from dpes.hashing import action_key, digest
 from dpes.log import event, setup
 from dpes.logstore import IDLE_S, POLL_S, LogDir, LogTruncated, tail
 from dpes.messages import ExecutorFailure, TaskResult
@@ -39,6 +42,10 @@ LOG_ROOT = "/var/lib/dpes/logs"  # same volume (plan/15, D15.2)
 STORE_TIMEOUT_S = 60  # a 16 MiB blob crosses the network
 QUEUE_TIMEOUT_S = 3600.0  # launch to start signal (D09.4)
 RUN_MARGIN_S = 5.0  # past the task's own time limit, silence is a failure
+# What the work runs on: the toolchain of the workers' image, not this host
+# (plan/16, D16.1, D16.7). Keys of another toolchain must never match, so this
+# goes up whenever the image's compilers change.
+PLATFORM_ID = os.environ.get("DPES_PLATFORM_ID", "linux/amd64:gcc")
 _FINISHED = {State.SUCCEEDED, State.FAILED, State.ERROR}
 # The state machine method that each kind of journal entry calls (plan/14).
 _METHODS = {"running": "running", "result": "on_result",
@@ -73,7 +80,8 @@ def _attempt(execute, attempt, coordinator, store, logs):
 @ray.remote(num_cpus=0, max_restarts=0)
 class BlobStore:
     """The store on the control node: content-addressed blobs (plan/11,
-    D11.5) and confirmed results, first writer wins (plan/12, D12.1)."""
+    D11.5) and confirmed results, first writer wins (plan/12, D12.1), which
+    are also the content cache (plan/16, D16.2)."""
 
     def __init__(self, root, results_path):
         setup()
@@ -91,11 +99,15 @@ class BlobStore:
     def missing(self, names):
         return self._blobs.missing(names)
 
-    def save_result(self, key, result):
-        return self._results.save(key, result)
+    def save_result(self, key, result, cache_key=None):
+        return self._results.save(key, result, cache_key)
 
     def result(self, key):
         return self._results.get(key)
+
+    def cached(self, cache_key):
+        """The confirmed success registered under `cache_key`, or None."""
+        return self._results.get_by_cache_key(cache_key)
 
 
 # It rebuilds its index from disk, so Ray may restart it (D15.12); async, so a
@@ -164,8 +176,8 @@ class _StoreClient:
         reply = self._actor.put.remote(digest(data), data)
         return ray.get(reply, timeout=STORE_TIMEOUT_S)
 
-    def save_result(self, key, result):
-        reply = self._actor.save_result.remote(key, result)
+    def save_result(self, key, result, cache_key=None):
+        reply = self._actor.save_result.remote(key, result, cache_key)
         return ray.get(reply, timeout=CALL_TIMEOUT_S)
 
     def append_fragment(self, execution_id, seq, data):
@@ -187,12 +199,13 @@ class Coordinator:
     """
 
     def __init__(self, execute, store, logs, journal_path,
-                 queue_timeout_s=QUEUE_TIMEOUT_S):
+                 queue_timeout_s=QUEUE_TIMEOUT_S, platform_id=PLATFORM_ID):
         setup()
         self._execute = execute
         self._store = store
         self._logs = logs
         self._queue_timeout_s = queue_timeout_s
+        self._platform_id = platform_id
         self._me = ray.get_runtime_context().current_actor
         self._jobs = {}
         self._by_key = {}  # idempotency key -> job id (plan/12, D12.7)
@@ -218,7 +231,7 @@ class Coordinator:
             self._submitted_at[job.job_id] = None
         event(_log, logging.INFO, "coordinator started",
               queue_timeout_s=queue_timeout_s, jobs=len(self._jobs),
-              unfinished=len(unfinished))
+              unfinished=len(unfinished), platform=platform_id)
         if unfinished:
             self._me.recover.remote()  # runs once this constructor returns
 
@@ -328,9 +341,17 @@ class Coordinator:
         attempt = launch.attempt
         if launch.delay_s:
             await asyncio.sleep(launch.delay_s)
+        key = self._action_key(job, attempt)
+        if key and not launch.retry:  # the round may already have succeeded
+            cached = await self._cached(attempt, key)
+            if cached is not None:
+                await self._settle(job, attempt, cached, hit=True,
+                                   note=f"cache hit: {cached.execution_id}")
+                return
+        # Journaled before the task exists: from here on the attempt is ours.
         self._apply(job, "running", attempt.execution_id)
         try:
-            outcome = await self._outcome(job, attempt)
+            outcome = await self._outcome(job, attempt, key)
         except _Silent:
             observed = DEADLINE
         except Exception as error:  # Ray reports that there is no result
@@ -342,11 +363,39 @@ class Coordinator:
                 observed = f"executor returned {type(outcome).__name__}"
         await self._settle(job, attempt, observed)
 
-    async def _settle(self, job, attempt, observed):
+    def _action_key(self, job, attempt):
+        """The key of this attempt's work, or "" if it may not use the cache.
+
+        Computed here, from what the attempt already carries: the inputs it
+        resolved (dependency outputs included, which chains the keys), its
+        command, its environment and its declared outputs (plan/16, D16.1).
+        """
+        if not job.spec.tasks[attempt.task].cache:  # F9.5: the task opted out
+            return ""
+        return action_key(attempt.command, attempt.env, attempt.inputs,
+                          attempt.outputs, self._platform_id)
+
+    async def _cached(self, attempt, key):
+        """The success already stored for `key`, or None (plan/16, D16.3).
+
+        A store that does not answer is a miss: the cache may save work, it
+        never holds a job up.
+        """
+        reply = self._store.cached.remote(key)
+        try:
+            return await asyncio.wait_for(
+                asyncio.wrap_future(reply.future()), CALL_TIMEOUT_S
+            )
+        except Exception as error:
+            event(_log, logging.WARNING, "cache lookup failed",
+                  execution=attempt.execution_id,
+                  error=type(error).__name__)
+            return None
+
+    async def _settle(self, job, attempt, observed, note="", hit=False):
         """Give the state machine what was observed of `attempt`, then
         launch what that unblocks."""
         eid = attempt.execution_id
-        note = ""
         if not isinstance(observed, TaskResult):
             # The task may have ended and been saved, with only its answer
             # lost: ask the store before calling it a failure (D12.4).
@@ -359,7 +408,11 @@ class Coordinator:
                 observed = saved
 
         if isinstance(observed, TaskResult) and observed.succeeded:
-            event(_log, logging.INFO, "attempt succeeded", execution=eid)
+            if hit:  # nothing ran, so there is no attempt to speak of
+                event(_log, logging.INFO, "cache hit", execution=eid,
+                      original=observed.execution_id)
+            else:
+                event(_log, logging.INFO, "attempt succeeded", execution=eid)
             unblocked = self._apply(job, "result", observed, eid, note)
         elif isinstance(observed, TaskResult):
             event(_log, logging.WARNING, "attempt failed", execution=eid,
@@ -393,14 +446,18 @@ class Coordinator:
                   error=type(error).__name__)
             return None
 
-    async def _outcome(self, job, attempt):
+    async def _outcome(self, job, attempt, key=""):
         """What the attempt returned. Raises _Silent past its deadlines, or
         whatever Ray raised."""
         eid = attempt.execution_id
         started = self._started[eid] = asyncio.Event()
         task = job.spec.tasks[attempt.task]
+        # The key travels with the attempt so the executor writes it in the
+        # same statement that confirms the result (plan/16, D16.6).
+        dispatched = (dataclasses.replace(attempt, cache_key=key) if key
+                      else attempt)
         ref = _attempt.options(max_retries=0, **_placement(task)).remote(
-            self._execute, attempt, self._me, self._store, self._logs
+            self._execute, dispatched, self._me, self._store, self._logs
         )
         event(_log, logging.INFO, "attempt launched", execution=eid,
               resources=_compact(task.resources))

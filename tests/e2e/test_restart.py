@@ -36,8 +36,11 @@ class CoordinatorRestartTest(unittest.TestCase):
 
     def test_a_job_finishes_although_the_coordinator_restarts_mid_task(self):
         code, job_id, err = submit({
-            "build": {"command": ["sh", "-c", "sleep 8; echo built"]},
-            "test": {"command": ["echo", "tested"], "needs": ["build"]},
+            # A task that must be seen running twice, so not from the cache.
+            "build": {"command": ["sh", "-c", "sleep 8; echo built"],
+                      "cache": False},
+            "test": {"command": ["echo", "tested"], "needs": ["build"],
+                     "cache": False},
         })
         self.assertEqual(0, code, err)
         self.until_running(job_id, "build")

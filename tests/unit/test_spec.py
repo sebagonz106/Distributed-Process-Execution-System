@@ -46,6 +46,19 @@ class SpecTestCase(unittest.TestCase):
         return caught.exception.errors
 
 
+class CacheTest(SpecTestCase):
+    """F9.5: a task may opt out of the content cache (plan/16, D16.4)."""
+
+    def test_a_task_uses_the_cache_by_default(self):
+        self.assertTrue(parse_job(job()).tasks["hello"].cache)
+
+    def test_a_task_may_opt_out(self):
+        self.assertFalse(parse_job(job(cache=False)).tasks["hello"].cache)
+
+    def test_the_opt_out_must_be_a_boolean(self):
+        self.assertRejected(job(cache="no"), "tasks.hello.cache")
+
+
 class RejectedJobTest(SpecTestCase):
     def test_the_document_must_be_an_object(self):
         self.assertRejected(["not", "a", "job"], "job")
@@ -83,9 +96,6 @@ class RejectedJobTest(SpecTestCase):
     def test_unknown_fields_are_rejected_to_catch_typos(self):
         self.assertRejected(job(timout_s=60), "tasks.hello.timout_s")
         self.assertRejected({**job(), "extra": 1}, "extra")
-
-    def test_fields_of_later_phases_are_rejected_until_they_exist(self):
-        self.assertRejected(job(cache=False), "tasks.hello.cache")
 
     def test_every_error_is_reported_at_once(self):
         errors = self.assertRejected(

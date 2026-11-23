@@ -25,7 +25,7 @@ _RAY_OWNED = {"memory", "object_store_memory"}  # Ray's own lower-case names
 _JOB_FIELDS = {"tasks"}
 _TASK_FIELDS = {
     "command", "env", "timeout_s", "needs", "resources", "retries",
-    "inputs", "outputs",
+    "inputs", "outputs", "cache",
 }
 MAX_PATH = 255
 MAX_RETRIES = 10
@@ -53,6 +53,10 @@ class TaskSpec:
     )
     inputs: Mapping[str, str] = field(default_factory=dict)  # path -> digest
     outputs: tuple[str, ...] = ()
+    # Whether an identical round that already succeeded may serve this one
+    # instead of running it (F9.5, plan/16 D16.4). Tasks whose work must be
+    # observed -- a timestamp, a host name, an injected fault -- say no.
+    cache: bool = True
 
 
 @dataclass(frozen=True)
@@ -200,11 +204,15 @@ def _parse_task(path, raw, errors):
     elif len(set(outputs)) != len(outputs):
         errors.append(f"{path}.outputs: a path is listed twice")
 
+    cache = raw.get("cache", True)
+    if not isinstance(cache, bool):
+        errors.append(f"{path}.cache: must be true or false")
+
     if len(errors) > found:
         return None
     return TaskSpec(
         tuple(command), dict(env), float(timeout), tuple(needs), resources,
-        {**DEFAULT_RETRIES, **retries}, dict(inputs), tuple(outputs),
+        {**DEFAULT_RETRIES, **retries}, dict(inputs), tuple(outputs), cache,
     )
 
 

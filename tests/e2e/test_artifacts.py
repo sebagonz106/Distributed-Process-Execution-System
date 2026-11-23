@@ -27,14 +27,23 @@ class ArtifactTest(unittest.TestCase):
         wait_for_gateway()
 
     def project(self, tasks=None):
-        """A copy of the example, optionally with its job replaced."""
+        """A copy of the example, with every task set to run for real.
+
+        These tests watch the build happen: workers named, artifacts crossing
+        them, a file left behind. A task served from the content cache runs
+        nothing and would test none of it (plan/16, F9.5).
+        """
         folder = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, folder, True)
         for name in os.listdir(EXAMPLE):
             shutil.copy(os.path.join(EXAMPLE, name), folder)
-        if tasks:
-            with open(os.path.join(folder, "job.json"), "w") as handle:
-                json.dump({"tasks": tasks}, handle)
+        if tasks is None:
+            with open(os.path.join(folder, "job.json")) as handle:
+                tasks = json.load(handle)["tasks"]
+        tasks = {name: {**task, "cache": False}
+                 for name, task in tasks.items()}
+        with open(os.path.join(folder, "job.json"), "w") as handle:
+            json.dump({"tasks": tasks}, handle)
         return folder
 
     def run_project(self, folder):

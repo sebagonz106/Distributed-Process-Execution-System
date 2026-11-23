@@ -35,8 +35,8 @@ _log = logging.getLogger(__name__)
 
 def execute(attempt: Attempt, store):
     """`store` has get(digest) -> bytes or None, put(bytes) -> digest,
-    save_result(key, result) -> the confirmed result for that key, and
-    append_fragment / close_fragments for the log (plan/15, D15.8)."""
+    save_result(key, result, cache_key) -> the confirmed result for that key,
+    and append_fragment / close_fragments for the log (plan/15, D15.8)."""
     eid = attempt.execution_id
     # Program and argument count only: arguments and env may hold secrets.
     event(_log, logging.INFO, "attempt running", execution=eid,
@@ -104,7 +104,9 @@ def execute(attempt: Attempt, store):
 
 def _confirm(attempt, store, fault, result):
     """Save the result before answering: the confirmation point (plan/12,
-    D12.2). Returns the winner, which another attempt may have saved."""
+    D12.2). The attempt's cache key goes in the same statement, so a success
+    is reachable by its work the moment it is confirmed (plan/16, D16.6).
+    Returns the winner, which another attempt may have saved."""
     eid = attempt.execution_id
     last = None
     for wait in (0, *_SAVE_WAITS):
@@ -113,7 +115,8 @@ def _confirm(attempt, store, fault, result):
                   error=f"{type(last).__name__}: {last}", retry_in_s=wait)
         time.sleep(wait)
         try:
-            winner = store.save_result(attempt.result_key, result)
+            winner = store.save_result(attempt.result_key, result,
+                                       attempt.cache_key)
             break
         except Exception as error:  # the store or the way to it failed
             last = error

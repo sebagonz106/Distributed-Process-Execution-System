@@ -366,7 +366,7 @@ Si no se cumplen, documentar como **deuda técnica conocida** en `plan/17-futura
 | Componente | Cambios |
 |------------|---------|
 | `dpes/store.py` | Tabla nueva en el esquema, migración, población en `save`, lectura en `get_by_cache_key`, método `evict(max_age_s)`. La columna `results.cache_key` se conserva como respaldo y para reconstruir la tabla si hace falta. |
-| `dpes/coordinator.py` | Ninguno: el actor `ResultStore` ya expone `get_by_cache_key`; cambia solo su implementación. |
+| `dpes/coordinator.py` | Ninguno: el actor `BlobStore` ya expone `cached` (`get_by_cache_key`); cambia solo su implementación. |
 | `tests/unit/test_store.py` | Casos de población, lectura con JOIN, migración y evicción. |
 
 **Algoritmo (pseudocódigo).**

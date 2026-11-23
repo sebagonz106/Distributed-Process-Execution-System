@@ -30,6 +30,9 @@ class Attempt:
     inputs: Mapping[str, str]  # workspace path -> blob digest
     outputs: tuple[str, ...]  # declared output paths
     timeout_s: float
+    # The cache key of this work (plan/16, D16.6), or "": the executor writes
+    # it with the result, so a confirmed success is reachable at once.
+    cache_key: str = ""
 
     @property
     def result_key(self) -> ResultKey:

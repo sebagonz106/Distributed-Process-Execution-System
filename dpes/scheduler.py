@@ -31,10 +31,16 @@ _FINISHED = {State.SUCCEEDED, State.FAILED, State.ERROR, State.SKIPPED}
 
 @dataclass(frozen=True)
 class Launch:
-    """Launch `attempt` after waiting `delay_s` seconds."""
+    """Launch `attempt` after waiting `delay_s` seconds.
+
+    `retry` marks an attempt that retries a failure of the round it belongs to.
+    Its work was already looked up in the cache when the round began, and a
+    round with no confirmed result cannot be served from it (plan/16, D16.4).
+    """
 
     attempt: Attempt
     delay_s: float = 0.0
+    retry: bool = False
 
 
 @dataclass(frozen=True)
@@ -224,8 +230,12 @@ class Job:
             task.retries_used[budget] += 1
             delay = retry_delay(failure_class, used, self._rand())
             self._record(task, failure_class.value, reason, delay)
-            if failure_class is FailureClass.TASK:
-                task.round += 1  # a new round competes for a new result
+            # A task failure competes for a new result, so its round starts
+            # over and is worth looking up; an infrastructure retry is the same
+            # round, whose work is known not to have a confirmed success.
+            new_round = failure_class is FailureClass.TASK
+            if new_round:
+                task.round += 1
             attempt = self._new_attempt(name)
             task.state = State.RETRY_WAIT
             self._record_event(
@@ -239,7 +249,7 @@ class Job:
                 failure_class=failure_class.value, retry_in_s=delay,
                 next_execution_id=attempt.execution_id,
             )
-            return [Launch(attempt, delay)]
+            return [Launch(attempt, delay, retry=not new_round)]
         self._record(task, failure_class.value, reason, None)
         if failure_class is FailureClass.TASK:
             task.state = State.FAILED

@@ -322,6 +322,9 @@ class RetryTest(unittest.TestCase):
         self.assertEqual(1, retry.attempt.round)
         self.assertEqual("job-1/hello/1/2", retry.attempt.execution_id)
         self.assertEqual(0.0, retry.delay_s)
+        # A new round competes for a new result, so it is looked up in the
+        # cache like any first attempt (plan/16, D16.4).
+        self.assertFalse(retry.retry)
 
     def test_a_worker_failure_is_retried_at_once_in_the_same_round(self):
         eid = self.start(worker=1)
@@ -330,6 +333,9 @@ class RetryTest(unittest.TestCase):
 
         self.assertEqual("job-1/hello/0/2", retry.attempt.execution_id)
         self.assertEqual(0.0, retry.delay_s)
+        # The same round has no confirmed success, so the cache is not asked
+        # again (plan/16, D16.4).
+        self.assertTrue(retry.retry)
 
     def test_a_retry_waits_in_retry_wait_until_it_is_launched(self):
         eid = self.start(network=1)

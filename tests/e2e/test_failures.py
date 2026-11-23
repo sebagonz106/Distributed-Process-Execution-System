@@ -14,7 +14,10 @@ from gateway_client import run_job, wait_for_gateway
 
 def task(fault=None, **fields):
     env = {"DPES_FAULT": fault} if fault else {}
-    return {"command": ["sh", "-c", "echo ran"], "env": env, **fields}
+    # Each of these tests watches an attempt: a cached result would show
+    # nothing of what it checks (plan/16, F9.5).
+    return {"command": ["sh", "-c", "echo ran"], "env": env, "cache": False,
+            **fields}
 
 
 class FailureTest(unittest.TestCase):

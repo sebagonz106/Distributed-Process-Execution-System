@@ -34,6 +34,7 @@ class LostConfirmationTest(unittest.TestCase):
         code, view = run_job({"t": {
             "command": ["sh", "-c", "echo ran"],
             "env": {"DPES_FAULT": "lose-ack:1"},
+            "cache": False,  # the command must run to be saved, then lost
         }})
 
         task = view["tasks"]["t"]
