@@ -172,7 +172,11 @@ class _Handler(BaseHTTPRequestHandler):
         task_view = view["tasks"].get(task)
         if task_view is None:
             return self._send(404, {"error": "unknown task"})
-        execution_id = task_view["execution_id"]
+        execution_id = task_view.get("execution_id")
+        if execution_id is None:
+            # A hit has no attempt of its own, but its work did run once: the
+            # log of that execution is the one to serve (D16.5).
+            execution_id = task_view.get("cached_from")
         if execution_id is None:
             return self._send(404, {"error": "the task has not run"})
         try:

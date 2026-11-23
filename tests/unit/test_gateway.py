@@ -314,10 +314,11 @@ class LogApiTest(ServerTestCase):
         self.coordinator.logs[self.EID] = self.output
         self.coordinator.views["job-1"] = [self.job()]
 
-    def job(self, execution_id=EID):
+    def job(self, execution_id=EID, cached_from=None):
         return {"job_id": "job-1", "state": "RUNNING",
                 "tasks": {"build": {"state": "RUNNING",
-                                    "execution_id": execution_id}}}
+                                    "execution_id": execution_id,
+                                    "cached_from": cached_from}}}
 
     def get(self, query="", headers=None, path=None):
         """GET a log as a plain client: status, headers and body."""
@@ -345,6 +346,16 @@ class LogApiTest(ServerTestCase):
         self.assertEqual((200, self.output), (status, body))
         self.assertEqual("text/plain; charset=utf-8", headers["Content-Type"])
         self.assertIsNone(headers["Transfer-Encoding"])
+        self.assertEqual([(self.EID, 0, None)], self.coordinator.reads)
+
+    def test_a_cached_task_serves_the_log_of_the_run_it_reuses(self):
+        # It has no attempt of its own, but its work did run once (D16.5).
+        self.coordinator.views["job-1"] = [self.job(execution_id=None,
+                                                    cached_from=self.EID)]
+
+        status, _, body = self.get()
+
+        self.assertEqual((200, self.output), (status, body))
         self.assertEqual([(self.EID, 0, None)], self.coordinator.reads)
 
     def test_offset_and_limit_slice_the_output_in_bytes(self):
@@ -685,6 +696,23 @@ class CliTest(ServerTestCase):
         code, out, _ = self.run_cli("status", "job-1")
 
         self.assertEqual((0, view("RUNNING")), (code, json.loads(out)))
+
+    def test_cache_stats_prints_what_the_cache_did(self):
+        stats = {"hits": 1, "misses": 2, "bytes_saved": 34}
+        self.coordinator.views["job-1"] = [
+            {**view("RUNNING"), "cache_stats": stats}
+        ]
+
+        code, out, _ = self.run_cli("cache-stats", "job-1")
+
+        self.assertEqual((0, stats), (code, json.loads(out)))
+
+    def test_cache_stats_of_a_coordinator_without_counters_is_empty(self):
+        self.coordinator.views["job-1"] = [view("RUNNING")]
+
+        code, out, _ = self.run_cli("cache-stats", "job-1")
+
+        self.assertEqual((0, {}), (code, json.loads(out)))
 
     def test_wait_exits_with_a_code_for_each_way_of_ending(self):
         for final, expected in (("SUCCEEDED", 0), ("FAILED", 1), ("ERROR", 2)):

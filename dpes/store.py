@@ -227,6 +227,19 @@ _CALLS = {
         lambda data: (data["execution_id"],
                       FailureClass(data["failure_class"]), data["reason"]),
     ),
+    "cache_hit": (  # the task was served without anything running (D16.3)
+        lambda name, outputs, original_execution, bytes_saved: {
+            "task": name, "outputs": dict(outputs),
+            "original_execution": original_execution,
+            "bytes_saved": bytes_saved,
+        },
+        lambda data: (data["task"], data["outputs"],
+                      data["original_execution"], data["bytes_saved"]),
+    ),
+    "cache_miss": (  # a count of lookups that had to run (D16.8)
+        lambda: {},
+        lambda data: (),
+    ),
     "finished": (  # the job is over; its feed gets JOB_FINISHED (D15.17)
         lambda: {},
         lambda data: (),

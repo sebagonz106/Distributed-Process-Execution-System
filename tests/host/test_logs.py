@@ -62,7 +62,8 @@ class LogTraceTest(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as handle:
                 json.dump({"tasks": {
                     "build": {"command": ["sh", "-c", "echo built"],
-                              "env": {"TOKEN": SECRET}},
+                              "env": {"TOKEN": SECRET},
+                              "cache": False},
                     "test": {"command": ["sh", "-c", "exit 1"],
                              "needs": ["build"]},
                 }}, handle)

@@ -64,6 +64,14 @@ class BlobDirTest(unittest.TestCase):
         self.assertEqual([absent],
                          self.store.missing([digest(HELLO), absent]))
 
+    def test_the_size_of_a_blob_is_known(self):
+        name = self.store.put(digest(HELLO), HELLO)
+
+        self.assertEqual(len(HELLO), self.store.get_size(name))
+
+    def test_a_blob_that_is_not_stored_has_no_size(self):
+        self.assertEqual(0, self.store.get_size(digest(b"never stored")))
+
 
 if __name__ == "__main__":
     unittest.main()

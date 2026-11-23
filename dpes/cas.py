@@ -45,6 +45,17 @@ class BlobDir:
         paths = [(name, self._path(name)) for name in names]
         return [name for name, path in paths if not os.path.exists(path)]
 
+    def get_size(self, name: str) -> int:
+        """Bytes of the blob named `name`; 0 if it is not stored.
+
+        For what a cache hit saves (plan/16, D16.8): a blob that is gone is a
+        zero in a count, not an error worth failing a job over.
+        """
+        try:
+            return os.path.getsize(self._path(name))
+        except OSError:
+            return 0
+
     def _path(self, name):
         # Checking the form also keeps a name from leaving the store's folder.
         if not is_digest(name):

@@ -108,9 +108,12 @@ class CacheTestCase(unittest.TestCase):
         """Whether the attempt that settled `task` did any work.
 
         Its log is the proof: a task served from the cache runs nothing and
-        writes none (plan/16, D16.5).
+        writes none (plan/16, D16.5). A hit has no attempt of its own, so
+        there is not even a log to look at.
         """
         execution_id = view["tasks"][task]["execution_id"]
+        if execution_id is None:
+            return False
         return self.client().log_size(execution_id) > 0
 
     def reason(self, view, task="t"):
@@ -139,6 +142,19 @@ class CacheHitTest(CacheTestCase):
         produced = first["tasks"]["t"]["outputs"]["out.txt"]
         self.assertEqual(produced, hit["tasks"]["t"]["outputs"]["out.txt"])
         self.assertEqual(b"build-stored", self.client().get_blob(produced))
+
+    def test_the_view_counts_the_hits_and_the_bytes_they_reused(self):
+        spec = job(t={"command": ["build-counted"], "outputs": ["out.txt"]})
+
+        first = self.run_job(spec)
+        hit = self.run_job(spec)
+
+        self.assertEqual({"hits": 0, "misses": 1, "bytes_saved": 0},
+                         first["cache_stats"])
+        self.assertEqual(
+            {"hits": 1, "misses": 1, "bytes_saved": len(b"build-counted")},
+            hit["cache_stats"],
+        )
 
     def test_the_same_task_on_another_worker_reuses_the_result(self):
         # The cache belongs to the cluster, not to a worker (D16.7): `b` is
@@ -275,6 +291,10 @@ class CacheJournalTest(CacheTestCase):
         self.assertEqual("SUCCEEDED", view["state"])
         self.assertEqual(hit["tasks"]["t"]["outputs"],
                          view["tasks"]["t"]["outputs"])
+        # The hit carries what it reused, so a restart counts it once more.
+        self.assertEqual(hit["tasks"]["t"]["cached_from"],
+                         view["tasks"]["t"]["cached_from"])
+        self.assertEqual(hit["cache_stats"], view["cache_stats"])
 
 
 if __name__ == "__main__":

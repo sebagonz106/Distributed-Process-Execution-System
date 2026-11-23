@@ -10,6 +10,7 @@ plan/08 (D08.4, D08.5) and plan/09 (D09.2 to D09.6).
 import random
 from dataclasses import dataclass
 from enum import Enum
+from typing import Mapping
 
 from dpes.failures import FailureClass, retry_delay
 from dpes.messages import Attempt, TaskResult
@@ -54,7 +55,7 @@ class Event:
 
     timestamp: float
     type: str  # TASK_LAUNCHED, ATTEMPT_SUCCEEDED, ATTEMPT_FAILED,
-    #            RETRY_SCHEDULED, TASK_SKIPPED or JOB_FINISHED
+    #            RETRY_SCHEDULED, TASK_SKIPPED, CACHE_HIT or JOB_FINISHED
     job_id: str
     task: str | None  # None for JOB_FINISHED: no single task is to blame
     execution_id: str  # "" when no attempt is involved
@@ -73,6 +74,7 @@ class _Task:
         self.round = 0
         self.attempts = 0
         self.execution_id = None  # attempt in flight or that settled the task
+        self.cached_from = None  # the execution a cache hit reuses (D16.5)
         self.result = None
         self.error = None
         self.failure_class = None
@@ -95,6 +97,10 @@ class Job:
         self._running = {}  # execution id -> task name
         self._events = []  # append-only, oldest first (D15.5)
         self._done = False  # JOB_FINISHED recorded once (D15.17)
+        # Lookups this job made of the content cache (plan/16, D16.8).
+        self._cache_hits = 0
+        self._cache_misses = 0
+        self._bytes_saved = 0
 
     def start(self) -> list[Launch]:
         """Launches for the tasks that depend on nothing."""
@@ -170,6 +176,39 @@ class Job:
         self._record_event("ATTEMPT_SUCCEEDED", execution_id, name, **payload)
         return self._settled(name)
 
+    def on_cache_hit(self, name: str, outputs: Mapping[str, str],
+                     original_execution: str | None,
+                     bytes_saved: int = 0) -> list[Launch]:
+        """Settle `name` with the result the cache already has (D16.3).
+
+        Nothing ran: the attempt launched for this round is taken back before
+        it loses its id, so a late answer to it is ignored instead of settling
+        a finished task, and a restart finds nothing in flight. The task keeps
+        the digests of the original execution -- the blobs are already in the
+        store (D16.5) -- and its id, so that execution's log can still be
+        served. The dependents are launched: the DAG goes on.
+        """
+        task = self._tasks[name]
+        self._running.pop(task.execution_id, None)
+        task.execution_id = None
+        task.state = State.SUCCEEDED
+        task.result = TaskResult("", 0, False, dict(outputs))
+        task.error = task.failure_class = None
+        task.cached_from = original_execution
+        self._cache_hits += 1
+        self._bytes_saved += bytes_saved
+        self._record(task, "CACHE_HIT", f"cache hit: {original_execution}", None)
+        self._record_event("CACHE_HIT", "", name,
+                           original_execution_id=original_execution)
+        return self._settled(name)
+
+    def on_cache_miss(self) -> None:
+        """A round asked the cache and found nothing to serve (D16.8).
+
+        No event: a miss is a metric, not a step of the job's history.
+        """
+        self._cache_misses += 1
+
     def on_failure(self, execution_id: str, failure_class: FailureClass,
                    reason: str) -> list[Launch]:
         name = self._running.pop(execution_id, None)
@@ -196,11 +235,18 @@ class Job:
         return {
             "job_id": self.job_id,
             "state": self.state.value,
+            "cache_stats": {
+                "hits": self._cache_hits,
+                "misses": self._cache_misses,
+                "bytes_saved": self._bytes_saved,
+            },
             "tasks": {
                 name: {
                     "state": task.state.value,
                     "needs": list(task.spec.needs),
                     "execution_id": task.execution_id,
+                    "cached": task.cached_from is not None,
+                    "cached_from": task.cached_from,
                     "exit_code": task.result and task.result.exit_code,
                     "timed_out": bool(task.result and task.result.timed_out),
                     "output": task.result.output_tail if task.result else "",

@@ -49,7 +49,8 @@ PLATFORM_ID = os.environ.get("DPES_PLATFORM_ID", "linux/amd64:gcc")
 _FINISHED = {State.SUCCEEDED, State.FAILED, State.ERROR}
 # The state machine method that each kind of journal entry calls (plan/14).
 _METHODS = {"running": "running", "result": "on_result",
-            "failure": "on_failure", "finished": "finished"}
+            "failure": "on_failure", "finished": "finished",
+            "cache_hit": "on_cache_hit", "cache_miss": "on_cache_miss"}
 _log = logging.getLogger(__name__)
 _log_store = logging.getLogger("dpes.logstore")
 
@@ -108,6 +109,10 @@ class BlobStore:
     def cached(self, cache_key):
         """The confirmed success registered under `cache_key`, or None."""
         return self._results.get_by_cache_key(cache_key)
+
+    def size(self, name):
+        """Bytes a stored blob takes, for what a cache hit saved (D16.8)."""
+        return self._blobs.get_size(name)
 
 
 # It rebuilds its index from disk, so Ray may restart it (D15.12); async, so a
@@ -345,9 +350,11 @@ class Coordinator:
         if key and not launch.retry:  # the round may already have succeeded
             cached = await self._cached(attempt, key)
             if cached is not None:
+                reused = await self._saved_bytes(attempt, cached)
                 await self._settle(job, attempt, cached, hit=True,
-                                   note=f"cache hit: {cached.execution_id}")
+                                   bytes_saved=reused)
                 return
+            self._apply(job, "cache_miss")  # journaled: it is a count (D16.8)
         # Journaled before the task exists: from here on the attempt is ours.
         self._apply(job, "running", attempt.execution_id)
         try:
@@ -392,9 +399,31 @@ class Coordinator:
                   error=type(error).__name__)
             return None
 
-    async def _settle(self, job, attempt, observed, note="", hit=False):
+    async def _saved_bytes(self, attempt, result) -> int:
+        """Bytes of the outputs a cache hit reuses, as the store has them.
+
+        A number for people to read, not state: a store that does not answer
+        costs the metric, never the hit (D16.8).
+        """
+        total = 0
+        for name in set(result.outputs.values()):  # one path may share a blob
+            reply = self._store.size.remote(name)
+            try:
+                total += await asyncio.wait_for(
+                    asyncio.wrap_future(reply.future()), CALL_TIMEOUT_S
+                )
+            except Exception as error:
+                event(_log, logging.WARNING, "cache size lookup failed",
+                      execution=attempt.execution_id, blob=name,
+                      error=type(error).__name__)
+                break  # a partial count beats holding the hit up
+        return total
+
+    async def _settle(self, job, attempt, observed, note="", hit=False,
+                      bytes_saved=0):
         """Give the state machine what was observed of `attempt`, then
-        launch what that unblocks."""
+        launch what that unblocks. `hit` says the result came from the cache,
+        so no attempt of this job produced it (D16.3)."""
         eid = attempt.execution_id
         if not isinstance(observed, TaskResult):
             # The task may have ended and been saved, with only its answer
@@ -410,10 +439,14 @@ class Coordinator:
         if isinstance(observed, TaskResult) and observed.succeeded:
             if hit:  # nothing ran, so there is no attempt to speak of
                 event(_log, logging.INFO, "cache hit", execution=eid,
-                      original=observed.execution_id)
+                      original=observed.execution_id,
+                      bytes_saved=bytes_saved)
+                unblocked = self._apply(job, "cache_hit", attempt.task,
+                                        observed.outputs,
+                                        observed.execution_id, bytes_saved)
             else:
                 event(_log, logging.INFO, "attempt succeeded", execution=eid)
-            unblocked = self._apply(job, "result", observed, eid, note)
+                unblocked = self._apply(job, "result", observed, eid, note)
         elif isinstance(observed, TaskResult):
             event(_log, logging.WARNING, "attempt failed", execution=eid,
                   failure_class=classify(observed).value,
@@ -517,8 +550,10 @@ class Coordinator:
         tasks = job.view()["tasks"]
         keep = {task["execution_id"] for task in tasks.values()
                 if task["execution_id"]}
+        # A cache hit's entry has no execution of its own: there is no log to
+        # look for, and a `None` would not even sort with the ids (D16.5).
         every = {attempt["execution_id"] for task in tasks.values()
-                 for attempt in task["attempts"]}
+                 for attempt in task["attempts"] if attempt["execution_id"]}
         dropped = sorted(every - keep)
         if not dropped:
             return

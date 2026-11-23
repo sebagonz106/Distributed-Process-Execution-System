@@ -29,7 +29,6 @@ solo se sigue su avance.
 - **Decisión:** (b) SHA-256 de la serialización canónica de `(command, env, inputs, outputs_declared, platform_id, key_format_version)`: JSON con claves ordenadas, sin espacios y en UTF-8, con las rutas de salida ordenadas antes de serializar. Se implementa en `dpes/hashing.py` como `action_key(command, env, inputs, outputs, platform_id, key_format_version=ACTION_KEY_VERSION)`, que devuelve 64 hexadecimales en minúscula, sin prefijo. Es la clave de acción de D02.12.
 - **Porqué:** (a) hace las claves largas y frágiles ante cambios irrelevantes de formato; (c) traslada la corrección al usuario y rompe la garantía de «entradas idénticas → mismo trabajo». Un hash fijo de 64 hexadecimales es compacto, determinista y no requiere coordinación central para asignar IDs. Entran solo los campos que deciden el resultado: la plataforma evita servir un binario compilado con otro compilador; el orden de las salidas declaradas no cambia lo que produce el comando, así que ordenarlas evita fallos de caché falsos; el orden de los argumentos del comando sí importa y se conserva (D01.3); la versión del formato permite cambiar la carga más adelante sin colisionar con claves viejas. No lleva prefijo porque la clave no es el nombre de un blob: `hashing.digest` reserva la forma `sha256:` para eso.
 - **Consecuencia:** `dpes/hashing.py` gana `action_key`, con las pruebas en `tests/unit/test_hashing.py` (Commit 2). El coordinador le pasa su `platform_id` —imagen y compilador— al consultar la caché (Commit 4).
-- **Corrección (2026-11-25, antes de cerrar la fase):** la primera redacción omitía la plataforma y suponía un `hash_spec` que nunca existió. Se alinea aquí con D02.12; no se borra la opción descartada.
 
 ### D16.2 — La caché vive en el almacén de resultados (`dpes/store.py`), no en un componente aparte
 
@@ -45,8 +44,7 @@ solo se sigue su avance.
 - **Opciones:** (a) el ejecutor consulta la caché al arrancar; (b) el coordinador consulta antes de enviar el `Attempt`; (c) el almacén intercepta el `Attempt` y responde con el resultado si existe.
 - **Decisión:** (b) El coordinador, en `_run` y antes de que el intento exista en Ray, calcula la clave de acción de la ronda y llama a `store.cached(cache_key)`. Si hay acierto, asienta la tarea como `SUCCEEDED` con el resultado guardado y **no crea intento**. Un reintento de infraestructura no consulta: su ronda no tiene un éxito confirmado (D16.4), y `Launch.retry` lo distingue.
 - **Porqué:** (1) El coordinador es el único que conoce la especificación completa (comando, entorno, entradas resueltas, salidas declaradas) antes de despachar. (2) Evita lanzar trabajo en Ray, ahorra recursos y latencia. (3) Mantiene al ejecutor simple: no conoce la caché. (4) La consulta es una lectura SQLite rápida; no hay contención porque `WAL` permite lecturas concurrentes.
-- **Consecuencia:** el acierto se asienta en la máquina de estados como un resultado, no como un intento: no se diario como `running` (nada se lanzó, así que un reinicio no lo cuenta como en vuelo) y reutiliza `Job.on_result`, que marca la tarea `SUCCEEDED`, deja sus salidas y desbloquea a los dependientes. Una consulta que falla —almacén inalcanzable— se trata como un fallo de caché: se registra como aviso y la tarea se ejecuta, porque la caché puede ahorrar trabajo pero nunca detener un trabajo (S1). La clave la escribe el ejecutor junto con el resultado (D16.6). El historial de intentos registra `cache_hit: true` para trazabilidad (Commit 5).
-- **Enmienda (2026-11-23):** la primera redacción situaba la consulta en la transición `PENDING → RUNNING` y la extendía a «nueva ronda o reintento de infraestructura», lo que contradice D16.4; se corrige aquí. También daba por hecho el `cache_hit` del historial, que llega en el Commit 5.
+- **Consecuencia:** el acierto se asienta en la máquina de estados mediante `Job.on_cache_hit(name, outputs, original_execution)`, que marca la tarea `SUCCEEDED`, registra sus salidas, desbloquea a los dependientes mediante `self._settled(name)` (para que el DAG continúe), y **no crea intento**. No se diario como `running` (nada se lanzó, así que un reinicio no lo cuenta como en vuelo). Una consulta que falla —almacén inalcanzable— se trata como un fallo de caché: se registra como aviso y la tarea se ejecuta, porque la caché puede ahorrar trabajo pero nunca detener un trabajo (S1). La clave la escribe el ejecutor junto con el resultado (D16.6). El historial de intentos registra un intento virtual con `outcome: "CACHE_HIT"`, `execution_id: null`, `reason: "cache hit: <original_execution_id>"` para trazabilidad (Commit 5).
 
 ### D16.4 — Solo resultados `SUCCEEDED` (D06.2) entran y salen de la caché
 
@@ -62,16 +60,15 @@ solo se sigue su avance.
 - **Opciones:** (a) copiar los blobs del almacén de objetos (CAS) a las rutas de salida del nuevo espacio de trabajo; (b) registrar los digests en el resultado de la tarea actual y dejar que el cliente los descargue del CAS; (c) crear enlaces duros (hard links) entre blobs.
 - **Decisión:** (b) El coordinador marca la tarea `SUCCEEDED` con los **mismos digests** de salida que el resultado cachado. Los blobs ya están en el CAS (Fase 3, `cas.py` y actor `BlobStore`). El cliente descarga con `GET /blobs/<digest>` o `artifacts <job> link <dir>`.
 - **Porqué:** (1) El CAS es content-addressable: el mismo digest = mismo contenido. No hace falta copiar ni enlazar. (2) El ejecutor no participa: ahorra su arranque y aislamiento. (3) Funciona entre trabajadores distintos: el blob está en el volumen compartido `dpes-data` (Fase 3). (4) El espacio de trabajo del intento inexistente no se crea.
-- **Consecuencia:** La vista de la tarea muestra `cache_hit: true`, `execution_id: null`, `outputs` con los digests reutilizados. El historial de intentos registra un intento virtual con `cache_hit: true` y `class: "CACHE_HIT"`.
+- **Consecuencia:** La vista de la tarea muestra `cached: true` (booleano), `execution_id: null`, `outputs` con los digests reutilizados, y `cached_from: "<original_execution_id>"` para servir su log. El historial de intentos (`attempts`) registra una entrada con `outcome: "CACHE_HIT"`, `execution_id: null`, `reason: "cache hit: <original_execution_id>"`, `retry_in_s: null`, manteniendo la forma uniforme de los intentos.
 
 ### D16.6 — Fallo de caché: despacho normal y una sola escritura con la confirmación
 
 - **Contexto:** Si no hay acierto, la tarea se ejecuta normalmente. Al terminar con éxito, su resultado debe estar disponible para futuras tareas idénticas. El punto de confirmación de un resultado es el **ejecutor**: `executor._confirm` lo guarda antes de contestar y reintenta si el almacén no responde (plan/12, D12.2). `ResultLog.save` es `INSERT OR IGNORE` (D12.1), y D02.10 pide que la entrada de caché se escriba en la misma transacción que confirma el éxito, para que no haya un instante con el resultado confirmado y la caché vacía.
 - **Opciones:** (a) el ejecutor escribe en la caché al terminar; (b) el coordinador escribe en la caché al recibir `TaskResult` exitoso; (c) un proceso asíncrono popula la caché; (d) el coordinador actualiza la clave después, con una segunda sentencia sobre la fila ya confirmada.
 - **Decisión:** (a) La clave viaja dentro del intento: `Attempt` gana `cache_key: str = ""` —ampliación **aditiva** del contrato congelado de `messages.py`, con valor por defecto para no romper a quien construye intentos sin caché—; el coordinador la rellena al despachar (`dataclasses.replace`) y `executor._confirm` la pasa a `store.save_result(key, result, cache_key)` del actor `BlobStore`. Una sola sentencia escribe el resultado de la ronda y, si tuvo éxito, su clave (D16.2). Una clave vacía —tarea con `cache: false`, o una consulta que no procede— no registra nada: `save` la descarta.
-- **Porqué:** (1) Es la única forma de que la clave y la confirmación sean la misma escritura sin mover el punto de confirmación, que es lo que piden D02.10 y D12.2. (2) (b) era lo primero que se escribió aquí y no funciona con `INSERT OR IGNORE`: el ejecutor ya guardó la fila, y un segundo guardado del coordinador no añadiría la clave, así que la caché no se poblaría nunca. (3) (d) sí añadiría la clave, pero deja una ventana con el resultado confirmado y la caché no, y hay que repetirla en la ruta de reconciliación. (4) (c) necesita otro proceso y otra cola para una escritura que cabe en la que ya hay. (5) El campo va al final y con valor por defecto: los intentos que ya existen se siguen construyendo igual, y el diario no guarda intentos, así que no hay migración.
+- **Porqué:** (1) Es la única forma de que la clave y la confirmación sean la misma escritura sin mover el punto de confirmación, que es lo que piden D02.10 y D12.2. (2) (b) no funciona con `INSERT OR IGNORE`: el ejecutor ya guardó la fila, y un segundo guardado del coordinador no añadiría la clave, así que la caché no se poblaría nunca. (3) (d) sí añadiría la clave, pero deja una ventana con el resultado confirmado y la caché no, y hay que repetirla en la ruta de reconciliación. (4) (c) necesita otro proceso y otra cola para una escritura que cabe en la que ya hay. (5) El campo va al final y con valor por defecto: los intentos que ya existen se siguen construyendo igual, y el diario no guarda intentos, así que no hay migración.
 - **Consecuencia:** `messages.Attempt` gana el campo; `executor.execute` no cambia de firma; los dobles del almacén de las pruebas aceptan el tercer argumento opcional. La reconciliación no necesita nada nuevo: encuentra la clave en la misma fila que el resultado. La población de la caché es efecto colateral del guardado exitoso, así que un fallo de tarea o de infraestructura nunca la puebla (D16.4).
-- **Enmienda (2026-11-23):** la primera redacción decidía (b) —«el coordinador escribe»— y afirmaba que no habría estado intermedio. Se cambia a (a) por lo dicho en el porqué (2); (b) se conserva entre las opciones descartadas y se añade (d), que no estaba escrita.
 
 ### D16.7 — La caché es global al clúster, no por trabajador
 
@@ -117,7 +114,7 @@ def get_by_cache_key(self, cache_key: str) -> Optional[TaskResult]:
        Una clave vacía no encuentra nada."""
 ```
 
-### `dpes/coordinator.py` — Commit 4 (la consulta)
+### `dpes/coordinator.py` — Commit 4 (la consulta) y Commit 5 (el acierto)
 
 ```python
 async def _run(self, job, launch):
@@ -140,13 +137,85 @@ def _action_key(self, job, attempt) -> str:
 async def _cached(self, attempt, key) -> Optional[TaskResult]:
     """store.cached(key), o None si el almacén no contesta en CALL_TIMEOUT_S."""
 
+async def _settle(self, job, attempt, observed, note="", hit=False):
+    ...
+    if isinstance(observed, TaskResult) and observed.succeeded:
+        if hit:
+            # on_cache_hit marca la tarea SUCCEEDED, registra outputs,
+            # desbloquea dependientes vía _settled(name), y no crea intento.
+            unblocked = self._apply(job, "cache_hit", observed, attempt.execution_id, note)
+        else:
+            unblocked = self._apply(job, "result", observed, eid, note)
+    ...
+
 # actor BlobStore
 def cached(self, cache_key: str) -> Optional[TaskResult]:
     """El éxito confirmado registrado con esta clave (get_by_cache_key)."""
 ```
 
-El acierto reutiliza `Job.on_result`: la tarea pasa a `SUCCEEDED` con las salidas
-guardadas y sus dependientes se desbloquean como con cualquier resultado (D16.3).
+### `dpes/scheduler.py` — Commit 5 (manejo del acierto en la máquina de estados)
+
+```python
+class Job:
+    ...
+    def on_cache_hit(self, name: str, outputs: Mapping[str, str],
+                     original_execution: str | None) -> list[Launch]:
+        """Asienta un acierto de caché para `name`.
+
+        - Marca la tarea SUCCEEDED con los outputs dados.
+        - Registra cached_from = original_execution para servir su log.
+        - Emite evento CACHE_HIT con payload {original_execution_id, task}.
+        - Devuelve self._settled(name) para lanzar dependientes (el DAG continúa).
+        - No crea intento: task.execution_id queda None.
+        """
+        task = self._tasks[name]
+        task.state = State.SUCCEEDED
+        task.result = TaskResult("", 0, False, dict(outputs))
+        task.execution_id = None
+        task.cached_from = original_execution
+        task.error = task.failure_class = None
+        # Quitar del mapa de intentos en vuelo por si el intento tardío responde
+        self._running.pop(task.execution_id, None)
+        self._record_event("CACHE_HIT", "", name,
+                           original_execution_id=original_execution, task=name)
+        return self._settled(name)
+
+    def view(self) -> dict:
+        ...
+        for name, task in self._tasks.items():
+            ...
+            "cached": task.cached_from is not None,
+            "cached_from": task.cached_from,
+            "execution_id": task.execution_id,
+            ...
+```
+
+### `dpes/store.py` — Journal (Commit 5)
+
+```python
+# En Journal._METHODS y _CALLS (plan/14, D14.1):
+_METHODS = {
+    ...
+    "cache_hit": "on_cache_hit",
+}
+# El diario guarda: (job_id, "cache_hit", (name, outputs, original_execution), at)
+```
+
+### `dpes/gateway.py` — Commit 5 (servir log de tarea cacheada)
+
+```python
+# En GET /logs/<job>/<task>:
+task_view = view["tasks"][task]
+execution_id = task_view.get("execution_id")
+if execution_id is None:
+    cached_from = task_view.get("cached_from")
+    if cached_from:
+        # Sirve el log de la ejecución original
+        execution_id = cached_from
+    else:
+        return 404, {"error": "the task has not run"}
+# ... leer y servir log de execution_id ...
+```
 
 ### `dpes/messages.py` — ampliación aditiva de `Attempt` (D16.6)
 
@@ -211,7 +280,7 @@ class JobView:
 | Unitarias | `tests/unit/test_executor.py` | **Commit 4**: la clave del intento se guarda con el resultado en una sola escritura; un intento sin clave guarda sin ella |
 | Unitarias | `tests/unit/test_spec.py` | **Commit 4**: `cache` es verdadero por defecto; `false` lo desactiva; otro tipo se rechaza |
 | Unitarias | `tests/unit/test_scheduler.py` | **Commit 4**: `Launch.retry` es verdadero solo en el reintento de la misma ronda |
-| Unitarias | `tests/unit/test_scheduler_cache.py` | Acierto: tarea marcada SUCCEEDED sin intento, outputs reutilizados, cache_stats.hits++; Fallo: intento creado, cache_stats.misses++ (Commit 5) |
+| Unitarias | `tests/unit/test_scheduler_cache.py` | **Commit 5**: acierto → tarea SUCCEEDED sin intento, outputs reutilizados, cached_from registrado, evento CACHE_HIT emitido, _settled lanza dependientes; fallo → intento creado, cache_stats.misses++; `cached` en vista booleano; log servido desde `cached_from` |
 | Integración | `tests/integration/test_cache.py` | **Commit 4**: el mismo trabajo dos veces ejecuta solo la primera (se mide por los bytes de log del intento); el acierto devuelve los mismos digests y el blob sigue en el CAS; dos tareas idénticas en trabajadores distintos, una sola ejecuta; cambiar una entrada reejecuta solo esa tarea; el dependiente reejecuta si su artefacto cambia y se sirve si la fuente reejecuta y produce el mismo; un fallo nunca se sirve; `cache: false` ejecuta siempre y no deja nada reutilizable; un acierto sobrevive a un reinicio del coordinador |
 | Extremo a extremo | `tests/e2e/test_cache.py` | **Corte C7**: trabajo con dos tareas idénticas consecutivas; segunda termina instantáneamente, sin logs de ejecutor, artifacts correctos |
 
@@ -225,9 +294,10 @@ Al cerrar esta fase, actualizar `plan/00-contexto-y-restricciones.md`:
 
 ## 6. Notas de implementación
 
-- **Orden de archivos:** 1) `hashing.py` (clave de acción), 2) `store.py` (esquema y consultas), 3) `scheduler.py` y `spec.py` (`Launch.retry`, `cache: false`), 4) `coordinator.py` (la consulta antes de despachar) y `executor.py` (la clave con la confirmación, D16.6), 5) `spec.py` (cache_stats en la vista), 6) `cli.py` (comando `cache-stats`).
+- **Orden de archivos:** 1) `hashing.py` (clave de acción), 2) `store.py` (esquema y consultas), 3) `scheduler.py` y `spec.py` (`Launch.retry`, `cache: false`), 4) `coordinator.py` (la consulta antes de despachar) y `executor.py` (la clave con la confirmación, D16.6), 5) `scheduler.py` (`on_cache_hit`, `cached_from`, `cache_stats`), 6) `store.py` (Journal con `cache_hit`), 7) `gateway.py` (sirve log desde `cached_from`), 8) `spec.py` (`cache_stats` en la vista), 9) `cli.py` (comando `cache-stats`).
 - **De dónde sale `platform_id`:** es configuración del coordinador (imagen de trabajadores y cadena de herramientas), no algo que calcule el ejecutor: así dos trabajadores de la misma imagen producen la misma clave. Se lee de `DPES_PLATFORM_ID`, con `linux/amd64:gcc` por defecto —la imagen `dpes:dev`—, y **sube** cuando cambia la cadena de herramientas, porque las claves de otra no deben acertar. Commit 4 lo pasa a `action_key` y lo escribe en el evento de arranque.
 - **Migración BD:** al abrirse, `store.py` mira `PRAGMA table_info(results)` y añade `cache_key` y `succeeded` si faltan; `succeeded` se rellena leyendo cada fila, para no afirmar que un éxito falló, y las filas viejas quedan sin clave: se confirmaron antes de que hubiera caché y un resultado no guarda el comando con el que se puede reconstruir. `CREATE INDEX IF NOT EXISTS` lo hace idempotente.
 - **Las pruebas que observan una ejecución dicen `cache: false`:** `tests/e2e` y `tests/host` miran el log, los tiempos, el `hostname` o un fallo inyectado de un intento concreto. Sin la exclusión, un comando ya ejecutado —también en la pasada anterior, porque el volumen `dpes-data` sobrevive— devolvería un acierto y la prueba mediría otra cosa. Es el uso para el que existe F9.5. `tests/host` no lo necesita porque cada prueba mete un marcador único en el comando, así que su clave cambia en cada ejecución.
 - **Acierto y `bytes_saved`:** `cas.py` gana `get_size(digest) -> int` en el Commit 5, que es donde la vista gana `cache_stats` (D16.8).
+- **Log de tarea cacheada:** el gateway sirve el log de `cached_from` (la ejecución original) cuando `execution_id is None` y `cached_from` existe, porque el trabajo SÍ corrió y su log está guardado.
 - **Sin librerías nuevas:** solo `hashlib` (stdlib), `sqlite3` (stdlib), `dataclasses` (stdlib).

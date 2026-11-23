@@ -5,6 +5,7 @@
     python -m dpes.cli wait <job id>
     python -m dpes.cli artifacts <job id> <task> <folder>
     python -m dpes.cli logs <job id> <task> [-f] [-o N] [-n N]
+    python -m dpes.cli cache-stats <job id>
 """
 
 import argparse
@@ -60,6 +61,7 @@ def main(argv=None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("submit").add_argument("job_file")
     commands.add_parser("status").add_argument("job_id")
+    commands.add_parser("cache-stats").add_argument("job_id")
     wait = commands.add_parser("wait")
     wait.add_argument("job_id")
     wait.add_argument("--interval", type=float, default=1.0)
@@ -96,6 +98,10 @@ def main(argv=None) -> int:
         view = read(job_url)
         if args.command == "status":
             print(json.dumps(view, indent=2))
+            return 0
+        if args.command == "cache-stats":
+            # What the content cache did for this job (plan/16, D16.8).
+            print(json.dumps(view.get("cache_stats", {}), indent=2))
             return 0
         if args.command == "artifacts":
             _download(base, view, args.task, args.folder)

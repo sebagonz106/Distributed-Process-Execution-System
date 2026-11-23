@@ -368,6 +368,10 @@ class JournalTest(unittest.TestCase):
         calls = [
             ("job-1", "accepted", (SPEC, "key-1")),
             ("job-1", "running", ("job-1/compile/0/1",)),
+            ("job-1", "cache_hit",
+             ("compile", {"app": "sha256:" + "a" * 64},
+              "job-0/compile/0/1", 12)),
+            ("job-1", "cache_miss", ()),
             ("job-1", "result",
              (result("job-1/compile/0/1"), "job-1/compile/0/1", "a note")),
             ("job-1", "failure",
