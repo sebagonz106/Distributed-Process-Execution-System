@@ -71,10 +71,20 @@ class ActionKeyTest(unittest.TestCase):
             key(command=["gcc", "-O2", "-c"]), key(command=["-O2", "gcc", "-c"])
         )
 
+    def test_the_order_of_the_declared_inputs_does_not_matter(self):
+        # Same files with the same digests, listed the other way round.
+        self.assertEqual(
+            key(inputs={"a.c": SOURCE, "a.h": HEADER}),
+            key(inputs={"a.h": HEADER, "a.c": SOURCE}),
+        )
+
     def test_work_without_a_platform_is_refused(self):
-        # An empty platform would let a key from another toolchain hit.
-        with self.assertRaises(ValueError):
-            key(platform_id="")
+        # An empty platform would let a key from another toolchain hit, and a
+        # missing one is not a platform at all.
+        for empty in ("", None):
+            with self.subTest(platform=empty):
+                with self.assertRaises(ValueError):
+                    key(platform_id=empty)
 
     def test_the_default_version_is_the_published_one(self):
         self.assertEqual(ACTION_KEY_VERSION, 1)

@@ -243,6 +243,17 @@ class ResultLogCacheTest(unittest.TestCase):
         self.assertEqual(success("job-1/compile/0/1"),
                          self.open().get_by_cache_key(CACHE_KEY))
 
+    def test_a_later_failure_does_not_shadow_the_stored_success(self):
+        # Another task did the same work and failed: the key still answers
+        # with the success that is already confirmed (D16.4).
+        self.log.save(KEY, success("job-1/compile/0/1"), CACHE_KEY)
+
+        self.log.save(OTHER_JOB, result("job-2/compile/0/1", exit_code=1),
+                      CACHE_KEY)
+
+        self.assertEqual(success("job-1/compile/0/1"),
+                         self.log.get_by_cache_key(CACHE_KEY))
+
     def test_a_row_is_never_visible_without_its_key(self):
         # Result and key are one write: another reader never sees half of it.
         other = self.open()

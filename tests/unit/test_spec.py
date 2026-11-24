@@ -56,7 +56,10 @@ class CacheTest(SpecTestCase):
         self.assertFalse(parse_job(job(cache=False)).tasks["hello"].cache)
 
     def test_the_opt_out_must_be_a_boolean(self):
-        self.assertRejected(job(cache="no"), "tasks.hello.cache")
+        # `0` and `1` are ints, not booleans: a truthy value is not a yes.
+        for value in ("no", 0, 1, None, []):
+            with self.subTest(cache=value):
+                self.assertRejected(job(cache=value), "tasks.hello.cache")
 
 
 class RejectedJobTest(SpecTestCase):

@@ -247,6 +247,38 @@ class DagTest(unittest.TestCase):
 
         self.assertEqual(State.ERROR, job.state)
 
+    def test_a_hit_waits_for_the_other_needs_before_launching_the_join(self):
+        # The join needs the cached task and one still running: the hit
+        # settles its own task, not the join (plan/16, D16.3).
+        job = dag_job(a=[], b=["a"], c=["a"], d=["b", "c"])
+        eids = {l.attempt.task: l.attempt.execution_id for l in job.start()}
+        eids.update({l.attempt.task: l.attempt.execution_id
+                     for l in job.on_result(result(eids["a"]))})
+
+        self.assertEqual([], names(job.on_cache_hit("b", {}, "job-0/b/0/1")))
+        self.assertEqual(["d"], names(job.on_result(result(eids["c"]))))
+
+
+class CacheFinishedTest(unittest.TestCase):
+    """A job served entirely by the cache still reaches its end (D16.3)."""
+
+    def test_a_job_whose_tasks_all_hit_the_cache_ends_as_succeeded(self):
+        job = dag_job(a=[], b=["a"])
+        job.start()
+
+        only(job.on_cache_hit("a", {}, "job-0/a/0/1"))
+        job.on_cache_hit("b", {}, "job-0/b/0/1")
+        job.finished()
+
+        self.assertEqual(State.SUCCEEDED, job.state)
+        self.assertEqual([], job.unsettled())
+        end = job.events()[-1]
+        self.assertEqual(
+            ("JOB_FINISHED",
+             {"state": "SUCCEEDED", "counts": {"succeeded": 2}}),
+            (end.type, end.payload),
+        )
+
 
 class AdoptedResultTest(unittest.TestCase):
     """plan/12, D12.5: an attempt resolved with another attempt's result."""
